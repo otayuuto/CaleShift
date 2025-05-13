@@ -1,9 +1,18 @@
+from fastapi import FastAPI
+
+from app.api.routers import api_router
+from app.core.config import settings
+
+app = FastAPI(title=settings.PROJECT_NAME, openapi_url=f"{settings.API_V1_STR}/openapi.json")
+
 # main.py (設定読み込み確認版)
 from fastapi import FastAPI
 # config.py から settings オブジェクトをインポート
 from app.core.config import settings # app/core/config.py が存在する必要あり
 
 app = FastAPI(title=settings.PROJECT_NAME) # タイトルを設定から取得
+
+app.include_router(api_router, prefix=settings.API_V1_STR)
 
 @app.get("/")
 async def read_root():
