@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>シフト設定</title>
+    <!-- (オプション) 簡単なCSS -->
+    <style>
+        body { font-family: sans-serif; margin: 15px; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input[type="text"], select, textarea {
+            width: 50%;
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        textarea { min-height: 60px; }
+        .checkbox-group label { font-weight: normal; display: inline-block; margin-right: 10px;}
+        button {
+            background-color: #00B900; /* LINE Green */
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover { background-color: #008C00; }
+        .error-message { color: red; margin-top: 5px; }
+        .success-message { color: green; margin-top: 5px; }
+    </style>
+    <!-- LIFF SDK -->
+    <script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+</head>
+<body>
+    <h1>シフト読み取り設定</h1>
+    <form id="settingsForm">
+        <div class="form-group">
+            <label for="workplaceName">バイト先名:</label>
+            <input type="text" id="workplaceName" name="workplaceName" required>
+        </div>
+
+        <div class="form-group">
+            <label for="targetName">あなたの名前（シフト表の表記通りに）:</label>
+            <input type="text" id="targetName" name="targetName" required>
+        </div>
+
+        <hr>
+        <h2>日付のルール</h2>
+        <div class="form-group">
+            <label for="dateFormatType">日付の主な形式:</label>
+            <select id="dateFormatType" name="dateFormatType">
+                <option value="YYYY/MM/DD">YYYY/MM/DD (例: 2024/05/15)</option>
+                <option value="MM/DD">MM/DD (例: 05/15)</option>
+                <option value="MM月DD日">MM月DD日 (例: 5月15日)</option>
+                <option value="DD日 (曜日)">DD日 (曜日) (例: 15日 (水))</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="dateCustomDescription">日付に関する補足情報 (ヒント):</label>
+            <textarea id="dateCustomDescription" name="dateCustomDescription" placeholder="例: 各行の左端, 表の一番上の行"></textarea>
+        </div>
+
+        <hr>
+        <h2>時間のルール</h2>
+        <div class="form-group">
+            <label for="timeFormatType">時間の主な形式:</label>
+            <select id="timeFormatType" name="timeFormatType">
+                <option value="HH:MM-HH:MM">HH:MM-HH:MM (例: 10:00-17:00)</option>
+                <option value="HH-HH">HH-HH (例: 10-17)</option>
+                <option value="HH時～HH時">HH時～HH時 (例: 10時～17時)</option>
+                <option value="開始時刻と終了時刻が別々の欄">開始時刻と終了時刻が別々の欄</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>"休み" の表記 (複数選択可):</label>
+            <div class="checkbox-group">
+                <label><input type="checkbox" name="restIndicator" value="休"> 休</label>
+                <label><input type="checkbox" name="restIndicator" value="OFF"> OFF</label>
+                <label><input type="checkbox" name="restIndicator" value="×"> ×</label>
+                <label><input type="checkbox" name="restIndicator" value="／"> ／</label>
+                <label><input type="checkbox" name="restIndicator" value="空白セル"> 空白セル</label>
+                <label><input type="checkbox" name="restIndicator" value="指定なし"> 指定なし</label>
+                <!-- 必要に応じて他の選択肢を追加 -->
+            </div>
+        </div>
+        <div class="form-group">
+            <label for="timeCustomDescription">時間に関する補足情報 (ヒント):</label>
+            <textarea id="timeCustomDescription" name="timeCustomDescription" placeholder="例: 時間は名前のすぐ右のセル"></textarea>
+        </div>
+
+        <button type="submit">設定を保存</button>
+        <div id="messageArea"></div>
+    </form>
+
+    <script>
+        let lineUserId = null;
+
+        async function initializeLiff() {
+            try {
+                // LIFF_IDはLINE Developersコンソールで取得したものを設定
+                await liff.init({ liffId: "YOUR_LIFF_ID_HERE" });
+                if (!liff.isLoggedIn()) {
+                    // ログインしていなければログインを促す
+                    // 本番環境では自動でログインページにリダイレクトされることが多い
+                    document.getElementById('messageArea').textContent = "LINEログインが必要です。";
+                    // liff.login(); // 必要に応じて自動ログイン
+                    return;
+                }
+                const profile = await liff.getProfile();
+                lineUserId = profile.userId;
+                console.log("LIFF initialized. User ID:", lineUserId);
+            } catch (error) {
+                console.error("LIFF Initialization failed", error);
+                document.getElementById('messageArea').textContent = "LIFFの初期化に失敗しました: " + error.message;
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            initializeLiff();
+
+            const form = document.getElementById('settingsForm');
+            const messageArea = document.getElementById('messageArea');
+
+            form.addEventListener('submit', async function(event) {
+                event.preventDefault();
+                messageArea.textContent = ""; // メッセージをクリア
+
+                if (!lineUserId) {
+                    messageArea.textContent = "LINE User IDが取得できませんでした。再度お試しください。";
+                    messageArea.className = 'error-message';
+                    return;
+                }
+
+                const formData = new FormData(form);
+                const restIndicators = [];
+                document.querySelectorAll('input[name="restIndicator"]:checked').forEach(checkbox => {
+                    restIndicators.push(checkbox.value);
+                });
+
+                const settingsData = {
+                    workplace_name: formData.get('workplaceName'),
+                    settings: {
+                        target_name: formData.get('targetName'),
+                        date_rules: {
+                            format_type: formData.get('dateFormatType'),
+                            custom_description: formData.get('dateCustomDescription') || null // 空文字はnullに
+                        },
+                        time_rules: {
+                            format_type: formData.get('timeFormatType'),
+                            rest_indicators: restIndicators,
+                            custom_description: formData.get('timeCustomDescription') || null // 空文字はnullに
+                        }
+                    }
+                };
+
+                console.log("Sending data:", JSON.stringify(settingsData, null, 2));
+
+                try {
+                    // APIエンドポイントのURLをFastAPIサーバーのURLに合わせて変更してください
+                    // 例: https://your-backend-domain.com/api/v1/users/${lineUserId}/workplaces
+                    // ローカル開発時は ngrok のURLなど
+                    const response = await fetch(`/api/v1/users/${lineUserId}/workplaces`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            // (オプション) 認証トークンなどが必要な場合はヘッダーに追加
+                            // 'Authorization': 'Bearer ' + liff.getAccessToken()
+                        },
+                        body: JSON.stringify(settingsData)
+                    });
+
+                    if (response.ok) {
+                        const result = await response.json();
+                        messageArea.textContent = `設定が保存されました！ (バイト先ID: ${result.workplace_id})`;
+                        messageArea.className = 'success-message';
+                        form.reset(); // フォームをリセット
+                        // liff.closeWindow(); // 保存成功後にLIFFを閉じる場合
+                    } else {
+                        const errorResult = await response.json();
+                        messageArea.textContent = `保存に失敗しました: ${errorResult.detail || response.statusText}`;
+                        messageArea.className = 'error-message';
+                    }
+                } catch (error) {
+                    console.error("Error submitting form:", error);
+                    messageArea.textContent = "通信エラーが発生しました: " + error.message;
+                    messageArea.className = 'error-message';
+                }
+            });
+        });
+    </script>
+</body>
+</html>
