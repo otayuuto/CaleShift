@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 # プロジェクトルートにあることを想定
 # config.py が app/core/ にあるので、2階層上がる
 dotenv_path = os.path.join(os.path.dirname(__file__), '..', '..', '.env')
-load_dotenv(dotenv_path=dotenv_path)
+load_dotenv(dotenv_path=dotenv_path, override=True)
 # print(f"DEBUG: Loading .env from: {dotenv_path}") # デバッグ用
 # print(f"DEBUG: LINE_CHANNEL_ACCESS_TOKEN from env: {os.getenv('LINE_CHANNEL_ACCESS_TOKEN')}") # デバッグ用
 
