@@ -27,11 +27,15 @@ class Settings(BaseSettings):
     GOOGLE_OAUTH_REDIRECT_URI: str
     GCP_PROJECT_ID: str
 
+    GOOGLE_CALENDAR_SCOPES: str = "https://www.googleapis.com/auth/calendar.events"
+
     # model_config は Pydantic V2 の書き方
     # class Config:
     #     env_file = "../../.env" # load_dotenv を使わない場合
     #     env_file_encoding = 'utf-8'
     #     extra = 'ignore'
+
+    SESSION_SECRET_KEY: str
 
 settings = Settings()
 # print(f"DEBUG: Loaded Settings LINE_CHANNEL_ACCESS_TOKEN: {settings.LINE_CHANNEL_ACCESS_TOKEN if hasattr(settings, 'LINE_CHANNEL_ACCESS_TOKEN') else 'Not found'}") # デバッグ用
