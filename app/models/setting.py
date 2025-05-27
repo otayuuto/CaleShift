@@ -56,5 +56,5 @@ class WorkplaceResponse(WorkplaceCreate):
     updated_at: datetime
 
     class Config:
-        orm_mode = True # Firestoreのドキュメントオブジェクトから変換しやすくする
+        from_attributes = True # Firestoreのドキュメントオブジェクトから変換しやすくする
         # from_attributes = True # Pydantic V2
