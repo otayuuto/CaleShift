@@ -1,31 +1,36 @@
+# main.py
 from fastapi import FastAPI
-
-from app.api.routers import api_router
+from starlette.middleware.sessions import SessionMiddleware
+from app.api.api_v1.api import api_router as api_v1_router # google_auth ルータを含む
 from app.core.config import settings
 
-app = FastAPI(title=settings.PROJECT_NAME, openapi_url=f"{settings.API_V1_STR}/openapi.json")
+app = FastAPI(title=settings.PROJECT_NAME)
 
-# main.py (設定読み込み確認版)
-from fastapi import FastAPI
-# config.py から settings オブジェクトをインポート
-from app.core.config import settings # app/core/config.py が存在する必要あり
+# SessionMiddleware の設定
+# 重要: secret_keyは固定の文字列にしてください。
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.SESSION_SECRET_KEY,
+    # session_cookie="your_app_session", # クッキー名を変更したい場合
+    # max_age=14 * 24 * 60 * 60,  # セッションの有効期限 (秒)、デフォルトは2週間
+    # path="/", # セッションクッキーが有効なパス
+    # domain=None, # セッションクッキーが有効なドメイン
+    # secure=True, # HTTPS経由でのみクッキーを送信 (本番推奨、ngrokはHTTPSなのでTrueでも可)
+    # httponly=True, # JavaScriptからクッキーにアクセス不可 (推奨)
+    # samesite="lax" # CSRF対策 (lax または strict)
+)
 
-app = FastAPI(title=settings.PROJECT_NAME) # タイトルを設定から取得
-
-app.include_router(api_router, prefix=settings.API_V1_STR)
+app.include_router(api_v1_router, prefix=settings.API_V1_STR)
 
 @app.get("/")
-async def read_root():
-    # .envから読み込んだ値（またはデフォルト値）が表示される
-    return {"message": f"Welcome to {settings.PROJECT_NAME}!"}
+async def root():
+    return {"message": f"{settings.PROJECT_NAME} is running!"}
 
-@app.get("/config-check")
-async def check_config():
-    # .envから読み込んだシークレットなどを確認（本番では公開しないように注意）
-    return {"line_secret_loaded": bool(settings.LINE_CHANNEL_SECRET != "dummy_secret")}
-
-if __name__ == "__main__":
-    import uvicorn
-    # hostを環境変数から読み込む例 (より柔軟)
-    # uvicorn.run("main:app", host=settings.HOST, port=settings.PORT, reload=True)
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+# (必要であれば) api_v1_router に google_auth.router を含める設定を確認
+# 例: app/api/api_v1/api.py
+# from fastapi import APIRouter
+# from app.api.endpoints import google_auth # , other_routers...
+#
+# api_router = APIRouter()
+# api_router.include_router(google_auth.router, prefix="/google", tags=["google"])
+# # api_router.include_router(other_routers.router, ...)
