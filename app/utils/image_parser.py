@@ -176,8 +176,8 @@ def parse_shift_text_to_structured_data(text: str) -> List[ShiftInfo]:
                     current_record = {'name': line_content}
                     expecting_next = 'role' # 新しい人の担当を期待
                 else: # 前のレコードに名前がない場合、これが名前かもしれない
-                     current_record['name'] = line_content
-                     expecting_next = 'role' # 担当を期待
+                    current_record['name'] = line_content
+                    expecting_next = 'role' # 担当を期待
             else: # 期待外のものが来た場合
                 print(f"DEBUG: Expecting role, but got: \"{line_content}\".")
                 # ここでレコードを確定させるか、継続するかはポリシーによる
@@ -369,8 +369,8 @@ F1
     sample_text_vision_api_like = """
 シフト表 5月 27日
 区別 氏名 担当 開始時間 終了時間
-渡邉遥 ホール 10:00 16:00
-渡邉杏士 フロント 10:00 16:00
+渡邉遼 ホール 10:00 16:00
+渡邉蒼士 フロント 10:00 16:00
 金田翔 フロント 16:00 0:00
 太田悠登 ホール 16:00 0:00
     """
