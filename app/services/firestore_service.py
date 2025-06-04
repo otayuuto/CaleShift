@@ -1,98 +1,126 @@
-
-from google.cloud import firestore_v1 as firestore # firestore_v1.Client と firestore_v1.AsyncClient を使用
+# app/services/firestore_service.py
+from google.cloud import firestore
+from typing import Optional, Dict, Any, List # List を追加
 from datetime import datetime, timezone
+# from app.models.user import User, GoogleAuthInfo
+from app.core.config import settings
+import traceback # traceback をインポート
+import json # json をインポート (refresh_access_token で使用)
 
-from app.core.config import settings # GCP_PROJECT_ID を使う場合
-from app.models.setting import WorkplaceCreate, WorkplaceResponse # LIFF設定保存用のPydanticモデル
+# Firestoreクライアントの初期化
+try:
+    # ↓↓↓ ここで database="caleshiftdb" を指定します ↓↓↓
+    db = firestore.Client(project=settings.GCP_PROJECT_ID, database="caleshiftdb")
+    print(f"INFO: Firestore client initialized successfully for database 'caleshiftdb' in project '{settings.GCP_PROJECT_ID}'.")
+except Exception as e:
+    print(f"ERROR: Failed to initialize Firestore client: {e}")
+    traceback.print_exc()
+    db = None
 
-# --- 既存の同期処理 (save_parsed_shifts) のためのFirestoreクライアント ---
-# この部分は変更しません
-db_sync = firestore.Client(project=settings.GCP_PROJECT_ID if settings.GCP_PROJECT_ID else None)
+# (get_user_document_id_by_line_id 関数は、もしusersコレクションのドキュメントIDが
+#  LINE User ID でない場合に user_id フィールドで検索するために使うなら残しておきます。
+#  今回の save_google_credentials_for_user の実装では、ドキュメントID = LINE User ID を想定しています。)
 
-def save_parsed_shifts(user_id: str, shifts: list[dict]):
+async def save_google_credentials_for_user(line_user_id: str, credentials_json: str, scopes: List[str]):
     """
-    解析されたシフト情報をユーザーごとにFirestoreに保存する。(同期処理)
-    Args:
-        user_id: LINEユーザーID
-        shifts: 解析されたシフト情報のリスト (各要素は辞書)
+    指定されたLINEユーザーIDのユーザーのGoogle認証情報をFirestoreに保存/更新します。
+    usersコレクションのドキュメントIDがLINE User IDそのものであることを想定。
     """
-    if not shifts:
-        print(f"No shifts to save for user {user_id}.")
+    if not db:
+        print("ERROR: Firestore client not initialized. Cannot save credentials.")
         return False
-
+    
     try:
-        batch = db_sync.batch() # 既存の同期クライアント db_sync を使用
-        user_shifts_collection = db_sync.collection('users').document(user_id).collection('shifts')
+        user_doc_ref = db.collection('users').document(line_user_id)
+        user_doc = user_doc_ref.get() # 同期的にgetを実行
 
-        for shift_data in shifts:
-            doc_ref = user_shifts_collection.document()
-            data_to_save = shift_data.copy()
-            data_to_save['line_user_id'] = user_id
-            # 同期クライアントでは firestore.SERVER_TIMESTAMP を使用
-            data_to_save['created_at'] = firestore. अभी # または firestore.SERVER_TIMESTAMP
-            batch.set(doc_ref, data_to_save)
-        batch.commit()
-        print(f"Successfully saved {len(shifts)} shifts for user {user_id} to Firestore.")
-        return True
-    except Exception as e:
-        print(f"Error saving shifts for user {user_id} to Firestore: {e}")
-        return False
-
-# --- ここから新しく追加する非同期処理 (LIFF設定保存) のための FirestoreService クラス ---
-class FirestoreService:
-    def __init__(self):
-        if settings.GCP_PROJECT_ID:
-            self.db_async = firestore.AsyncClient(project=settings.GCP_PROJECT_ID)
-        else:
-            print("Warning: GCP_PROJECT_ID is not set for AsyncClient. Firestore client will try to infer it.")
-            self.db_async = firestore.AsyncClient()
-
-    async def create_workplace(self, line_user_id: str, workplace_data: WorkplaceCreate) -> WorkplaceResponse:
-        """
-        新しいバイト先設定をFirestoreに作成する (非同期処理)
-        """
-        now = datetime.now(timezone.utc)
-
-        user_doc_ref = self.db_async.collection("users").document(line_user_id)
-        workplaces_collection_ref = user_doc_ref.collection("workplaces")
-        new_workplace_doc_ref = workplaces_collection_ref.document()
-        workplace_id = new_workplace_doc_ref.id
-
-        data_to_save = {
-            "workplace_id": workplace_id,
-            "workplace_name": workplace_data.workplace_name,
-            "settings": workplace_data.settings.dict(exclude_none=True),
-            "line_user_id": line_user_id,
-            "created_at": now, # 非同期クライアントの場合、datetimeオブジェクトを直接渡すのが一般的
-            "updated_at": now,
+        auth_info_data = {
+            'credentials_json': credentials_json,
+            'scopes': scopes,
+            'last_authenticated_at': datetime.now(timezone.utc)
         }
 
-        try:
-            await new_workplace_doc_ref.set(data_to_save)
-            print(f"Successfully created workplace '{workplace_id}' for user '{line_user_id}' (async)")
-        except Exception as e:
-            print(f"Error saving workplace to Firestore (async): {e}")
-            raise
+        if user_doc.exists:
+            user_doc_ref.update({
+                'google_auth_info': auth_info_data,
+                'calendar_connected': True,
+                'updated_at': datetime.now(timezone.utc)
+            }) # 同期的にupdateを実行
+            print(f"INFO: Successfully updated Google credentials for LINE user: {line_user_id}")
+        else:
+            print(f"WARNING: User document for LINE user ID {line_user_id} not found. Creating new one.")
+            user_data_to_create = {
+                # 'user_id': line_user_id, # ドキュメントIDがLINE User IDなので、このフィールドは必須ではない
+                'name': 'New User', # 仮のデフォルト名
+                'email': None,      # 仮
+                'calendar_connected': True,
+                'google_auth_info': auth_info_data,
+                'created_at': datetime.now(timezone.utc),
+                'updated_at': datetime.now(timezone.utc)
+            }
+            user_doc_ref.set(user_data_to_create) # 同期的にsetを実行
+            print(f"INFO: Successfully created user and saved Google credentials for LINE user: {line_user_id}")
+            
+        return True
+    except Exception as e:
+        print(f"ERROR: Failed to save Google credentials for LINE user {line_user_id}: {e}")
+        traceback.print_exc()
+        return False
 
-        response_data = WorkplaceResponse(
-            workplace_id=workplace_id,
-            workplace_name=workplace_data.workplace_name,
-            settings=workplace_data.settings,
-            line_user_id=line_user_id,
-            created_at=now,
-            updated_at=now,
-        )
-        return response_data
+async def get_google_credentials_for_user(line_user_id: str) -> Optional[Dict[str, Any]]:
+    """
+    指定されたLINEユーザーIDのユーザーのGoogle認証情報 (google_auth_infoマップ) をFirestoreから取得します。
+    """
+    if not db: return None
+    try:
+        user_doc_ref = db.collection('users').document(line_user_id)
+        user_doc = user_doc_ref.get() # 同期的にgetを実行
+        if user_doc.exists:
+            user_data = user_doc.to_dict()
+            return user_data.get('google_auth_info')
+        else:
+            print(f"WARNING: No user document found for LINE user ID: {line_user_id}")
+            return None
+    except Exception as e:
+        print(f"ERROR: Failed to get Google credentials for LINE user {line_user_id}: {e}")
+        traceback.print_exc()
+        return None
 
-    # (オプション) 特定ユーザーのシフトを取得する関数などの例 (既存のものはコメントアウトのまま)
-    # def get_user_shifts(user_id: str): # これは同期のまま
-    #     shifts = []
-    #     docs = db_sync.collection('users').document(user_id).collection('shifts').stream()
-    #     for doc in docs:
-    #         shifts.append(doc.to_dict())
-    #     return shifts
+# (refresh_access_token 関数も同様に db を使うので、dbの初期化が成功していることが前提)
+async def refresh_google_access_token_for_user(line_user_id: str) -> bool:
+    """
+    ユーザーのアクセストークンをリフレッシュし、更新された認証情報をFirestoreに保存します。
+    :return: 成功した場合はTrue、失敗した場合はFalse
+    """
+    if not db: return False
+    
+    google_auth_info = await get_google_credentials_for_user(line_user_id)
+    if not google_auth_info or not google_auth_info.get('credentials_json'):
+        print(f"ERROR: No Google credentials found for user {line_user_id} to refresh.")
+        return False
 
-    # --- 将来的にFirestoreServiceクラスに追加するかもしれない非同期メソッドのプレースホルダ ---
-    # async def get_workplace_async(self, line_user_id: str, workplace_id: str) -> Optional[WorkplaceResponse]:
-    #     # ... (非同期でバイト先設定を取得するロジック) ...
-    #     pass
+    credentials_json_str = google_auth_info['credentials_json']
+    
+    try:
+        credentials = Credentials.from_authorized_user_info(json.loads(credentials_json_str), scopes=settings.GOOGLE_CALENDAR_SCOPES.split())
+        if credentials and credentials.expired and credentials.refresh_token:
+            print(f"INFO: Access token for {line_user_id} expired, attempting to refresh.")
+            credentials.refresh(Request()) # google.auth.transport.requests.Request
+            
+            updated_credentials_json = credentials.to_json()
+            updated_scopes = credentials.scopes if credentials.scopes else []
+            
+            # Firestoreに更新された認証情報を保存
+            await save_google_credentials_for_user(line_user_id, updated_credentials_json, updated_scopes)
+            print(f"INFO: Access token for {line_user_id} refreshed and saved successfully.")
+            return True
+        elif credentials and not credentials.expired:
+            print(f"INFO: Access token for {line_user_id} is still valid.")
+            return True # 更新不要だが成功とみなす
+        else:
+            print(f"WARNING: Could not refresh token for {line_user_id}. No refresh token or other issue.")
+            return False
+    except Exception as e:
+        print(f"ERROR: Failed to refresh access token for user {line_user_id}: {e}")
+        traceback.print_exc()
+        return False

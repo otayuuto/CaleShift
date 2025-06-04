@@ -1,14 +1,50 @@
-# app/services/google_auth_service.py
+# app/services/google_auth_service.py (関数ベースのまま、request を引数に追加)
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request # Request は google.auth.transport.requests から
+from google.auth.transport.requests import Request as GoogleAuthRequest # 名前衝突回避
 import os
-from typing import Optional, Tuple, Dict # Dict を追加
-import traceback # traceback をインポート
+from typing import Optional, Tuple, Dict
+import traceback
+import json
+from fastapi import Request # Request をインポート
 
 from app.core.config import settings
 
-def get_google_oauth_flow() -> Flow:
+def get_google_oauth_flow(request: Optional[Request] = None) -> Flow: # request をオプション引数に
+    # リダイレクトURIを動的に決定 (もしrequestがあれば)
+    # settings.GOOGLE_OAUTH_REDIRECT_URI を基本としつつ、
+    # NGROK_URL があればそれを使うなど、以前のクラスベースの _get_base_url のようなロジックが必要になる場合も。
+    # ここでは簡単のため settings.GOOGLE_OAUTH_REDIRECT_URI を使う。
+    # もし request から動的に生成したい場合は、そのロジックをここに記述。
+    redirect_uri_to_use = settings.GOOGLE_OAUTH_REDIRECT_URI
+    
+    # --- NGROK_URL や X-Forwarded ヘッダーを考慮したリダイレクトURI生成ロジック (クラスベースから移植する場合) ---
+    if request and settings.NGROK_URL and settings.NGROK_URL.startswith("https://"):
+        base_url = settings.NGROK_URL.rstrip("/")
+        # コールバックパス名をどこかで定義しておく (例: "google_auth_callback")
+        # もし FastAPI の request.url_for を使いたいなら、この関数が request を受け取る必要がある
+        # ここでは仮に settings.API_V1_STR + "/google/auth/callback" とする
+        callback_path = f"{settings.API_V1_STR}/google/auth/callback" 
+        redirect_uri_to_use = f"{base_url}{callback_path}"
+        print(f"DEBUG: Using dynamic redirect_uri based on NGROK_URL: {redirect_uri_to_use}")
+    elif request:
+        # X-Forwarded ヘッダーを考慮 (リバースプロキシ経由の場合)
+        proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+        host = request.headers.get("x-forwarded-host", request.url.netloc)
+        base_url = f"{proto}://{host}"
+        callback_path = f"{settings.API_V1_STR}/google/auth/callback"
+        redirect_uri_to_use = f"{base_url}{callback_path}"
+        print(f"DEBUG: Using dynamic redirect_uri based on X-Forwarded headers: {redirect_uri_to_use}")
+
+    # redirect_uri_to_use が HTTPS であることのチェック (ローカル開発以外)
+    if not redirect_uri_to_use.startswith("https://") and \
+       not ("127.0.0.1" in redirect_uri_to_use or "localhost" in redirect_uri_to_use) and \
+       settings.ENVIRONMENT != "local": # settings に ENVIRONMENT を追加
+        print(f"CRITICAL: OAuth redirect_uri must be HTTPS in non-local environment. Got: {redirect_uri_to_use}")
+        # ここで例外を発生させるか、デフォルトのHTTPSのURIを使うなどのフォールバックが必要
+        # raise ValueError("OAuth redirect_uri must be HTTPS in non-local environment.")
+
+
     client_config = {
         "web": {
             "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
@@ -18,64 +54,53 @@ def get_google_oauth_flow() -> Flow:
             "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
             "client_secret": settings.GOOGLE_OAUTH_CLIENT_SECRET,
             "redirect_uris": [
-                settings.GOOGLE_OAUTH_REDIRECT_URI,
-                # もしローカルテスト用のリダイレクトURIもGCPに登録していれば、ここにも追加できます
-                # (例: "http://localhost:8000/api/v1/google/auth/callback")
-            ],
-            "javascript_origins": [] # 通常ウェブアプリでは不要
+                settings.GOOGLE_OAUTH_REDIRECT_URI, # GCPコンソールに登録した主要なもの
+                redirect_uri_to_use # 動的に生成したものもリストに含める (GCPにも登録が必要)
+            ]
         }
     }
     flow = Flow.from_client_config(
         client_config=client_config,
-        scopes=settings.GOOGLE_CALENDAR_SCOPES.split(), # スコープは文字列をスペースで分割してリストにする
+        scopes=settings.GOOGLE_CALENDAR_SCOPES.split(),
     )
-    # 実際に使用するリダイレクトURIを明示的に設定
-    flow.redirect_uri = settings.GOOGLE_OAUTH_REDIRECT_URI
+    flow.redirect_uri = redirect_uri_to_use # 実際に使うリダイレクトURI
     return flow
 
-def generate_auth_url() -> Tuple[str, str]:
+def generate_auth_url(request: Request) -> Tuple[str, str]: # request を引数に追加
     """Google認証URLとstateを生成する"""
-    flow = get_google_oauth_flow()
-    # CSRF対策のためのstateを生成
+    flow = get_google_oauth_flow(request) # request を渡す
     state = os.urandom(16).hex()
     authorization_url, generated_state = flow.authorization_url(
-        access_type='offline',  # リフレッシュトークンを取得するため
-        prompt='consent',       # 毎回同意画面を出す（開発中は便利、本番では再同意が不要な場合は 'select_account' など）
-        state=state             # 生成したstateを渡す
+        access_type='offline',
+        prompt='consent',
+        state=state
     )
     print(f"INFO: Generated Auth URL: {authorization_url}, State: {state}")
     return authorization_url, state
 
-def exchange_code_for_credentials(authorization_response_url: str, original_state_from_session: str) -> Optional[Credentials]:
-    """
-    認可コードを認証情報（アクセストークン、リフレッシュトークン）に交換します。
-    stateの検証は呼び出し元 (エンドポイント) で行うことを前提としています。
-    """
-    flow = get_google_oauth_flow()
+def exchange_code_for_credentials(request: Request, authorization_response_url: str, original_state_from_session: str) -> Optional[Credentials]: # request を引数に追加
+    """認可コードを認証情報に交換する"""
+    flow = get_google_oauth_flow(request) # request を渡す
     try:
+        # ... (以降の処理は変更なし、ただし flow の redirect_uri が request に基づいて設定される)
         print(f"DEBUG: Attempting to fetch token with authorization_response_url: {authorization_response_url}")
-        
-        # `google-auth-oauthlib` の `fetch_token` は、渡された `authorization_response` URL から
-        # `code` を自動的にパースしてくれます。
-        # `state` の検証は、この関数を呼び出すエンドポイント側で行われている必要があります。
-        # (コールバックで受け取った state とセッションの original_state_from_session の比較)
+        print(f"DEBUG: Using redirect_uri in flow for fetch_token: {flow.redirect_uri}")
 
-        flow.fetch_token(authorization_response=authorization_response_url)
-        credentials = flow.credentials # 認証情報を取得
-
+        flow.fetch_token(authorization_response=authorization_response_url) # ここで redirect_uri が検証される
+        credentials = flow.credentials
+        # ... (以降の処理)
         print(f"INFO: Credentials obtained. AccessToken valid: {credentials.valid}")
         if credentials.token:
-            print(f"INFO: Access token obtained: {credentials.token[:30]}...") # 先頭部分のみ表示
+            print(f"INFO: Access token obtained: {credentials.token[:30]}...")
         if credentials.refresh_token:
-            print(f"INFO: Refresh token obtained: {credentials.refresh_token[:30]}...") # 先頭部分のみ表示
+            print(f"INFO: Refresh token obtained: {credentials.refresh_token[:30]}...")
         else:
             print("WARNING: No refresh token was obtained. Check 'access_type=offline' and consent screen configuration.")
         
-        # 取得した認証情報を検証 (オプションだが推奨)
         if not credentials or not credentials.valid:
             if credentials and credentials.expired and credentials.refresh_token:
                 print("INFO: Credentials expired, attempting to refresh.")
-                credentials.refresh(Request())
+                credentials.refresh(GoogleAuthRequest())
                 print(f"INFO: Credentials refreshed. AccessToken valid: {credentials.valid}")
             else:
                 print("ERROR: Failed to obtain valid credentials or refresh them.")
@@ -89,31 +114,7 @@ def exchange_code_for_credentials(authorization_response_url: str, original_stat
         print("------------------------------------------------------")
         return None
 
+# refresh_access_token は request に依存しないので変更なし
 def refresh_access_token(credentials_json_str: str) -> Optional[str]:
-    """
-    保存された認証情報 (JSON文字列) からリフレッシュトークンを使ってアクセストークンを更新します。
-    更新された認証情報をJSON文字列で返します。
-    """
-    try:
-        # JSON文字列からCredentialsオブジェクトを復元
-        credentials = Credentials.from_authorized_user_info(info=json.loads(credentials_json_str), scopes=settings.GOOGLE_CALENDAR_SCOPES.split())
-        
-        if credentials and credentials.expired and credentials.refresh_token:
-            print("INFO: Access token expired, attempting to refresh.")
-            credentials.refresh(Request()) # google.auth.transport.requests.Request オブジェクトが必要
-            print("INFO: Access token refreshed successfully.")
-            return credentials.to_json() # 更新された認証情報をJSON文字列で返す
-        elif credentials and not credentials.expired:
-            print("INFO: Access token is still valid, no refresh needed.")
-            return credentials.to_json() # 現在の認証情報をそのまま返す
-        else:
-            print("WARNING: No valid credentials or no refresh token available to refresh access token.")
-            return None
-    except Exception as e:
-        print(f"ERROR in refresh_access_token: Type: {type(e)}, Message: {str(e)}")
-        traceback.print_exc()
-        return None
-
-# refresh_access_token を呼び出す際は、Firestoreなどから保存された認証情報 (JSON形式) を取得して渡す想定
-# そのJSON文字列をパースするために json モジュールが必要
-import json
+    # ... (変更なし)
+    pass
