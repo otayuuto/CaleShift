@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Googleカレンダー連携</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; text-align: center; }
+        button { padding: 10px 20px; font-size: 16px; cursor: pointer; }
+        p { margin-top: 20px; }
+        .error { color: red; }
+    </style>
+</head>
+<body>
+    <h1>Googleカレンダー連携</h1>
+    <p id="message">LIFFアプリを初期化中です...</p>
+    <button id="googleLoginButton" style="display: none;">Googleアカウントと連携する</button>
+
+    <script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+    <script>
+        // ★★★ あなたのLIFF IDに置き換えてください ★★★
+        const MY_LIFF_ID = "2007555495-xYG0qGmY"; 
+        // ★★★ FastAPIサーバーのOAuth開始エンドポイントのベースURL (ngrok) ★★★
+        // 例: "https://xxxx.ngrok-free.app" (最後のスラッシュなし)
+        const FASTAPI_BASE_URL = "https://aba1-101-110-54-228.ngrok-free.app"; 
+        // ★★★ FastAPIのGoogleログインパス (例: "/api/v1/google/login") ★★★
+        const GOOGLE_LOGIN_PATH = "/api/v1/google/login"; 
+
+
+        document.addEventListener('DOMContentLoaded', function () {
+            initializeLiff();
+        });
+
+        async function initializeLiff() {
+            try {
+                console.log("Initializing LIFF...");
+                await liff.init({ liffId: MY_LIFF_ID });
+                console.log("LIFF initialized.");
+
+                if (!liff.isLoggedIn()) {
+                    console.log("User is not logged in to LINE. Logging in...");
+                    // ユーザーがLINEにログインしていない場合、ログインを促す
+                    // ログイン後、再度このページが読み込まれる
+                    liff.login({ redirectUri: window.location.href }); 
+                    return; 
+                }
+                console.log("User is logged in to LINE.");
+
+                // ユーザープロファイルを取得
+                const profile = await liff.getProfile();
+                console.log("User profile:", profile);
+                
+                document.getElementById('message').textContent = `${profile.displayName} さん、Googleカレンダーと連携してシフトを自動登録しましょう！`;
+                const loginButton = document.getElementById('googleLoginButton');
+                loginButton.style.display = 'block';
+
+                loginButton.onclick = function () {
+                    // FastAPIサーバーのOAuth開始エンドポイントにユーザーIDを付けてリダイレクト
+                    const googleAuthUrl = `${FASTAPI_BASE_URL}${GOOGLE_LOGIN_PATH}?line_id=${profile.userId}&display_name=${encodeURIComponent(profile.displayName)}`;
+                    console.log("Redirecting to Google Auth URL:", googleAuthUrl);
+                    if (liff.isInClient()) {
+                        // LIFFブラウザ内で開いている場合は、外部ブラウザで開くことを推奨 (OAuthフローのため)
+                        liff.openWindow({ url: googleAuthUrl, external: true });
+                    } else {
+                        // 通常のウェブブラウザで開いている場合
+                        window.location.href = googleAuthUrl;
+                    }
+                };
+
+            } catch (error) {
+                console.error("LIFF Initialization failed or error during process:", error);
+                document.getElementById('message').textContent = 'エラーが発生しました。LIFFアプリを再度開いてみてください。';
+                document.getElementById('message').classList.add('error');
+            }
+        }
+    </script>
+</body>
+</html>
