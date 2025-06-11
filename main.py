@@ -34,16 +34,19 @@ async def startup_app_resources(): # 関数名をより具体的に (DB以外も
     print(f"INFO: Application startup process begins for {settings.PROJECT_NAME}...")
     # Firestoreクライアントの初期化
     try:
-        print(f"DEBUG_FIRESTORE (startup): Attempting to initialize Firestore client with project_id: '{settings.GCP_PROJECT_ID}'")
+        database_id_to_use = "caleshiftdb" # ★★★ ここにデータベースIDを指定 ★★★
+        print(f"DEBUG_FIRESTORE (startup): Attempting to initialize Firestore client with project_id: '{settings.GCP_PROJECT_ID}' and database_id: '{database_id_to_use}'")
+        
         if not settings.GCP_PROJECT_ID:
             print("CRITICAL_FIRESTORE_ERROR (startup): GCP_PROJECT_ID is not set in settings.")
             app.state.db = None # dbが存在しないことを明確にする
             return # ここで処理を中断
 
-        app.state.db = firestore.Client(project=settings.GCP_PROJECT_ID)
-        print("INFO_FIRESTORE (startup): Firestore client initialized successfully and stored in app.state.db.")
+        # ↓↓↓ database パラメータを追加 ↓↓↓
+        app.state.db = firestore.Client(project=settings.GCP_PROJECT_ID, database=database_id_to_use)
+        print(f"INFO_FIRESTORE (startup): Firestore client initialized successfully for database '{database_id_to_use}' and stored in app.state.db.")
     except Exception as e:
-        print(f"CRITICAL_FIRESTORE_ERROR (startup): Failed to initialize Firestore client: {e}")
+        print(f"CRITICAL_FIRESTORE_ERROR (startup): Failed to initialize Firestore client for database '{database_id_to_use}': {e}")
         traceback.print_exc()
         app.state.db = None # エラー時もNoneをセット
 

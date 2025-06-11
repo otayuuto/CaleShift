@@ -1,159 +1,154 @@
 # app/services/calendar_service.py
+from google.cloud import firestore
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build, Resource
 from googleapiclient.errors import HttpError
 from typing import Optional, Dict, Any, List
-from datetime import datetime, time, date, timezone, timedelta # timedelta を追加
+from datetime import datetime, time, date, timezone, timedelta
 import json
-import traceback # traceback をインポート
+import traceback
+from zoneinfo import ZoneInfo # Python 3.9+ を想定
+from fastapi.concurrency import run_in_threadpool
 
-from app.services.firestore_service import get_google_credentials_for_user, save_google_credentials_for_user # Firestore連携
-from app.services.google_auth_service import refresh_access_token # google_auth_serviceからリフレッシュ関数
-from app.core.config import settings # settings をインポート
+from app.services.firestore_service import get_google_credentials_for_user, save_google_credentials_for_user
+from app.services.google_auth_service import refresh_access_token # 同期関数と仮定
+from app.core.config import settings
 from app.utils.image_parser import ShiftInfo
 
+# JSTタイムゾーンオブジェクトを一度だけ作成 (モジュールレベル)
+try:
+    JST = ZoneInfo("Asia/Tokyo")
+except Exception: # ImportError や他のエラーの可能性
+    print("WARNING_CAL_SERVICE: zoneinfo module (Python 3.9+) not available or Asia/Tokyo not found. Using fixed +09:00 UTC offset. DST will not be handled.")
+    JST = timezone(timedelta(hours=9))
 
-async def get_calendar_service(line_user_id: str) -> Optional[Resource]:
+
+async def get_calendar_service(
+    db_client: firestore.Client, # ★ Firestoreクライアントを引数に追加
+    line_user_id: str
+) -> Optional[Resource]:
     """
     指定されたLINEユーザーの認証情報を使ってGoogle Calendar APIサービスオブジェクトを構築します。
     必要に応じてアクセストークンをリフレッシュし、Firestoreの情報を更新します。
     """
-    auth_info = await get_google_credentials_for_user(line_user_id)
+    if not db_client:
+        print("ERROR_CAL_SERVICE: Firestore client (db_client) not provided.")
+        return None
+
+    auth_info = await get_google_credentials_for_user(db_client, line_user_id) # ★ db_client を渡す
     if not auth_info or not auth_info.get('credentials_json'):
-        print(f"ERROR: No Google credentials found in Firestore for user {line_user_id}.")
+        print(f"ERROR_CAL_SERVICE: No Google credentials found in Firestore for user {line_user_id}.")
         return None
 
     current_credentials_json = auth_info['credentials_json']
     
-    # まず現在の認証情報でCredentialsオブジェクトを作成してみる
     try:
-        creds = Credentials.from_authorized_user_info(json.loads(current_credentials_json))
+        creds = Credentials.from_authorized_user_info(json.loads(current_credentials_json), scopes=settings.GOOGLE_CALENDAR_SCOPES.split()) # スコープも渡す
     except Exception as e:
-        print(f"ERROR: Failed to load credentials from Firestore JSON for user {line_user_id}: {e}")
+        print(f"ERROR_CAL_SERVICE: Failed to load credentials from Firestore JSON for user {line_user_id}: {e}")
         return None
 
-    # アクセストークンが有効か、期限切れならリフレッシュが必要か確認
-    # creds.valid はアクセストークンの有効性をチェックするが、リフレッシュが必要かの判断は creds.expired も見る
-    if not creds.valid or creds.expired:
+    if not creds.valid or creds.expired: # トークンが無効または期限切れ
         if creds.refresh_token:
-            print(f"INFO: Calendar service - Token for {line_user_id} is invalid/expired. Attempting refresh.")
-            
-            # google_auth_service の refresh_access_token を呼び出す
-            # この関数は更新された credentials_json (文字列) を返す想定
-            updated_credentials_json = refresh_access_token(current_credentials_json) # 同期関数呼び出し
+            print(f"INFO_CAL_SERVICE: Token for {line_user_id} expired/invalid, attempting refresh.")
+            # refresh_access_token は同期関数なので await は不要
+            updated_credentials_json = refresh_access_token(current_credentials_json) 
 
             if updated_credentials_json:
-                print(f"INFO: Token refreshed for {line_user_id}. Updating Firestore.")
-                # Firestoreの認証情報を更新
-                # save_google_credentials_for_user は scopes も要求するので、元のスコープ情報が必要
+                print(f"INFO_CAL_SERVICE: Token refreshed for {line_user_id}. Updating Firestore.")
                 original_scopes = auth_info.get('scopes', settings.GOOGLE_CALENDAR_SCOPES.split())
-                await save_google_credentials_for_user(line_user_id, updated_credentials_json, original_scopes)
+                # save_google_credentials_for_user も db_client を必要とする
+                await save_google_credentials_for_user(db_client, line_user_id, updated_credentials_json, original_scopes) # ★ db_client を渡す
                 
-                # 更新された情報で再度Credentialsオブジェクトを作成
                 try:
-                    creds = Credentials.from_authorized_user_info(json.loads(updated_credentials_json))
+                    creds = Credentials.from_authorized_user_info(json.loads(updated_credentials_json), scopes=settings.GOOGLE_CALENDAR_SCOPES.split()) # スコープも渡す
                 except Exception as e:
-                    print(f"ERROR: Failed to load refreshed credentials for user {line_user_id}: {e}")
+                    print(f"ERROR_CAL_SERVICE: Failed to load refreshed credentials for user {line_user_id}: {e}")
+                    return None
+                
+                if not creds.valid: # リフレッシュ後も無効な場合はエラー
+                    print(f"ERROR_CAL_SERVICE: Credentials still invalid after refresh for user {line_user_id}.")
                     return None
             else:
-                print(f"ERROR: Token refresh failed for {line_user_id}. Cannot build calendar service.")
+                print(f"ERROR_CAL_SERVICE: Token refresh failed for {line_user_id}. Cannot build calendar service.")
                 return None
-        else:
-            print(f"ERROR: Credentials for {line_user_id} are invalid/expired and no refresh token is available.")
+        else: # リフレッシュトークンがない場合
+            print(f"ERROR_CAL_SERVICE: Credentials for {line_user_id} invalid/expired and no refresh token.")
             return None
 
-    # 有効なCredentialsオブジェクトを使ってAPIクライアントを構築
     try:
-        service = build('calendar', 'v3', credentials=creds, cache_discovery=False) # cache_discovery=False を試す
-        print(f"INFO: Google Calendar service client built successfully for user {line_user_id}.")
+        service = build('calendar', 'v3', credentials=creds, cache_discovery=False)
+        print(f"INFO_CAL_SERVICE: Google Calendar service client built successfully for user {line_user_id}.")
         return service
     except Exception as e:
-        print(f"ERROR: Failed to build Google Calendar service for user {line_user_id} with active credentials: {e}")
+        print(f"ERROR_CAL_SERVICE: Failed to build Google Calendar service for user {line_user_id}: {e}")
         traceback.print_exc()
         return None
 
 
-async def create_calendar_event(line_user_id: str, shift_info: ShiftInfo) -> Optional[str]:
+async def create_calendar_event(
+    db_client: firestore.Client, # ★ Firestoreクライアントを引数に追加
+    line_user_id: str,
+    shift_info: ShiftInfo
+) -> Optional[str]:
     if shift_info.is_holiday or not shift_info.start_time or not shift_info.end_time:
-        print(f"INFO: Skipping calendar event: holiday or incomplete time for user {line_user_id}, date: {shift_info.date}")
+        print(f"INFO_CAL_SERVICE: Skipping event creation (holiday/incomplete) for user {line_user_id}, date: {shift_info.date}")
         return None
 
-    service = await get_calendar_service(line_user_id)
+    service = await get_calendar_service(db_client, line_user_id) # ★ db_client を渡す
     if not service:
-        print(f"ERROR: Calendar service not available for user {line_user_id}. Cannot create event.")
+        print(f"ERROR_CAL_SERVICE: Calendar service not available for user {line_user_id}. Cannot create event.")
         return None
 
-    # JSTタイムゾーンオブジェクトの取得 (Python 3.9+ の zoneinfo を推奨)
-    try:
-        from zoneinfo import ZoneInfo
-        JST = ZoneInfo("Asia/Tokyo")
-    except ImportError:
-        # フォールバック (簡易的、夏時間非対応)
-        JST = timezone(timedelta(hours=9))
-        print("WARNING: zoneinfo module not found, using fixed +09:00 timezone. For DST, install backports.zoneinfo or use Python 3.9+.")
-
-
-    # naive datetimeオブジェクトを作成
     start_datetime_naive = datetime.combine(shift_info.date, shift_info.start_time)
     end_datetime_naive = datetime.combine(shift_info.date, shift_info.end_time)
 
-    # aware datetimeオブジェクトに変換
     start_datetime_aware = start_datetime_naive.replace(tzinfo=JST)
     end_datetime_aware = end_datetime_naive.replace(tzinfo=JST)
     
-    # 終了時刻が開始時刻より早い場合 (例: 22:00 - 02:00)、日付をまたぐと解釈
-    if end_datetime_aware < start_datetime_aware:
-        print(f"INFO: End time {end_datetime_aware} is before start time {start_datetime_aware}. Assuming next day for end time.")
+    if end_datetime_aware <= start_datetime_aware:
+        print(f"INFO_CAL_SERVICE: End time {end_datetime_aware} is <= start time {start_datetime_aware}. Assuming next day for end time.")
         end_datetime_aware += timedelta(days=1)
-
 
     event_summary = f"アルバイト: {shift_info.name or 'シフト'}"
     if shift_info.role:
         event_summary += f" ({shift_info.role})"
     
     description_parts = []
-    if shift_info.name:
-        description_parts.append(f"氏名: {shift_info.name}")
-    if shift_info.role:
-        description_parts.append(f"担当: {shift_info.role}")
-    if shift_info.memo:
-        description_parts.append(f"メモ: {shift_info.memo}")
+    if shift_info.name: description_parts.append(f"氏名: {shift_info.name}")
+    if shift_info.role: description_parts.append(f"担当: {shift_info.role}")
+    if shift_info.memo: description_parts.append(f"メモ: {shift_info.memo}")
     event_description = "\n".join(description_parts)
 
     event_body = {
         'summary': event_summary,
         'description': event_description,
-        'start': {
-            'dateTime': start_datetime_aware.isoformat(),
-            # 'timeZone': 'Asia/Tokyo', # aware datetime を使えば timeZone は不要なことが多い
-        },
-        'end': {
-            'dateTime': end_datetime_aware.isoformat(),
-            # 'timeZone': 'Asia/Tokyo',
-        },
+        'start': { 'dateTime': start_datetime_aware.isoformat() },
+        'end': { 'dateTime': end_datetime_aware.isoformat() },
+        # 'timeZone': 'Asia/Tokyo' は aware datetime を使えば通常不要
     }
 
     try:
-        print(f"DEBUG: Creating calendar event for user {line_user_id} with body: {event_body}")
-        created_event = service.events().insert(calendarId='primary', body=event_body).execute()
+        print(f"DEBUG_CAL_SERVICE: Creating calendar event for user {line_user_id} with body: {event_body}")
+        # service.events().insert() は同期的メソッドなので run_in_threadpool で実行
+        created_event = await run_in_threadpool(
+            service.events().insert(calendarId='primary', body=event_body).execute
+        )
         event_id = created_event.get('id')
-        print(f"INFO: Event created for user {line_user_id}: ID: {event_id}, Summary: {event_summary}")
-        
-        # (オプション) 作成したイベントIDをFirestoreのshift_historyなどに保存する
-        # await firestore_service.log_shift_to_history(line_user_id, shift_info, event_id)
-
+        print(f"INFO_CAL_SERVICE: Event created for user {line_user_id}: ID: {event_id}, Summary: {event_summary}")
         return event_id
     except HttpError as error:
-        print(f"ERROR: An API error occurred while creating event for user {line_user_id}: {error.resp.status} - {error.resp.reason}")
+        # ... (エラー処理は既存のものをベースに、必要なら詳細化) ...
+        print(f"ERROR_CAL_SERVICE: HttpError creating event for {line_user_id}: {error.resp.status} - {error.resp.reason if error.resp else 'Unknown reason'}")
         try:
             error_content = json.loads(error.content.decode())
             if 'error' in error_content and 'message' in error_content['error']:
                 error_details = error_content['error']['message']
                 print(f"ERROR_DETAILS (HttpError): {error_details}")
         except:
-            print(f"ERROR_DETAILS (HttpError): Could not parse error content. Raw: {error.content}")
+            print(f"ERROR_DETAILS (HttpError): Could not parse error content. Raw: {error.content if hasattr(error, 'content') else 'No content'}")
         return None
     except Exception as e:
-        print(f"ERROR: Unexpected error creating calendar event for user {line_user_id}: {e}")
+        print(f"ERROR_CAL_SERVICE: Unexpected error creating event for {line_user_id}: {e}")
         traceback.print_exc()
         return None
