@@ -1,98 +1,117 @@
-
-from google.cloud import firestore_v1 as firestore # firestore_v1.Client と firestore_v1.AsyncClient を使用
+# app/services/firestore_service.py
+from google.cloud import firestore
+from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
+import traceback
+import json
+from fastapi.concurrency import run_in_threadpool # ★ run_in_threadpool をインポート
 
-from app.core.config import settings # GCP_PROJECT_ID を使う場合
-from app.models.setting import WorkplaceCreate, WorkplaceResponse # LIFF設定保存用のPydanticモデル
+async def save_google_credentials_for_user(
+    db_client: firestore.Client,
+    line_user_id: str,
+    credentials_json: str,
+    scopes: List[str]
+) -> bool:
+    if not db_client:
+        print("ERROR_FIRESTORE_SERVICE: Firestore client (db_client) is not provided.")
+        return False
+    
+    try:
+        user_doc_ref = db_client.collection('users').document(line_user_id)
+        
+        # user_doc_ref.get() は同期的メソッドなので、run_in_threadpool で実行
+        user_doc = await run_in_threadpool(user_doc_ref.get) # ★ 変更点
 
-# --- 既存の同期処理 (save_parsed_shifts) のためのFirestoreクライアント ---
-# この部分は変更しません
-db_sync = firestore.Client(project=settings.GCP_PROJECT_ID if settings.GCP_PROJECT_ID else None)
+        if not user_doc.exists:
+            print(f"ERROR_FIRESTORE_SERVICE: User document for LINE user ID '{line_user_id}' not found.")
+            return False
 
-def save_parsed_shifts(user_id: str, shifts: list[dict]):
-    """
-    解析されたシフト情報をユーザーごとにFirestoreに保存する。(同期処理)
-    Args:
-        user_id: LINEユーザーID
-        shifts: 解析されたシフト情報のリスト (各要素は辞書)
-    """
-    if not shifts:
-        print(f"No shifts to save for user {user_id}.")
+        auth_info_data = {
+            'credentials_json': credentials_json,
+            'scopes': scopes,
+            'last_authenticated_at': datetime.now(timezone.utc)
+        }
+        update_data = {
+            'google_auth_info': auth_info_data,
+            'calendar_connected': True,
+            'updated_at': datetime.now(timezone.utc)
+        }
+        
+        # user_doc_ref.update() も同期的メソッドなので、run_in_threadpool で実行
+        await run_in_threadpool(user_doc_ref.update, update_data) # ★ 変更点
+        print(f"INFO_FIRESTORE_SERVICE: Successfully updated Google credentials for LINE user: {line_user_id}")
+        return True
+        
+    except Exception as e:
+        print(f"ERROR_FIRESTORE_SERVICE: Failed to save Google credentials for LINE user {line_user_id}: {e}")
+        traceback.print_exc()
         return False
 
+async def get_google_credentials_for_user(
+    db_client: firestore.Client,
+    line_user_id: str
+) -> Optional[Dict[str, Any]]:
+    if not db_client:
+        print("ERROR_FIRESTORE_SERVICE: Firestore client (db_client) is not provided.")
+        return None
     try:
-        batch = db_sync.batch() # 既存の同期クライアント db_sync を使用
-        user_shifts_collection = db_sync.collection('users').document(user_id).collection('shifts')
+        user_doc_ref = db_client.collection('users').document(line_user_id)
+        
+        user_doc = await run_in_threadpool(user_doc_ref.get) # ★ 変更点
 
-        for shift_data in shifts:
-            doc_ref = user_shifts_collection.document()
-            data_to_save = shift_data.copy()
-            data_to_save['line_user_id'] = user_id
-            # 同期クライアントでは firestore.SERVER_TIMESTAMP を使用
-            data_to_save['created_at'] = firestore. अभी # または firestore.SERVER_TIMESTAMP
-            batch.set(doc_ref, data_to_save)
-        batch.commit()
-        print(f"Successfully saved {len(shifts)} shifts for user {user_id} to Firestore.")
+        if user_doc.exists:
+            user_data = user_doc.to_dict()
+            if user_data:
+                auth_info = user_data.get('google_auth_info')
+                if auth_info:
+                    return auth_info
+                else:
+                    print(f"WARNING_FIRESTORE_SERVICE: 'google_auth_info' not found for {line_user_id}")
+                    return None
+            else:
+                print(f"WARNING_FIRESTORE_SERVICE: User document data is None for {line_user_id}")
+                return None
+        else:
+            print(f"WARNING_FIRESTORE_SERVICE: No user document found for {line_user_id}")
+            return None
+    except Exception as e:
+        print(f"ERROR_FIRESTORE_SERVICE: Failed to get Google credentials for {line_user_id}: {e}")
+        traceback.print_exc()
+        return None
+
+async def create_initial_user_document_on_follow(
+    db_client: firestore.Client,
+    line_user_id: str,
+    display_name: Optional[str] = None
+) -> bool:
+    if not db_client:
+        print("ERROR_FIRESTORE_SERVICE: Firestore client (db_client) is not provided.")
+        return False
+    try:
+        user_doc_ref = db_client.collection('users').document(line_user_id)
+        
+        user_doc = await run_in_threadpool(user_doc_ref.get) # ★ 変更点
+
+        if user_doc.exists:
+            print(f"INFO_FIRESTORE_SERVICE: User document for {line_user_id} already exists.")
+            # 必要なら updated_at を更新
+            # await run_in_threadpool(user_doc_ref.update, {'updated_at': datetime.now(timezone.utc)})
+            return True
+
+        initial_user_data = {
+            'user_id': line_user_id,
+            'name': display_name or f"User-{line_user_id[:8]}",
+            'email': "",
+            'calendar_connected': False,
+            'google_auth_info': None,
+            'created_at': datetime.now(timezone.utc),
+            'updated_at': datetime.now(timezone.utc)
+        }
+        
+        await run_in_threadpool(user_doc_ref.set, initial_user_data) # ★ 変更点
+        print(f"INFO_FIRESTORE_SERVICE: Successfully created initial user document for {line_user_id}")
         return True
     except Exception as e:
-        print(f"Error saving shifts for user {user_id} to Firestore: {e}")
+        print(f"ERROR_FIRESTORE_SERVICE: Failed to create initial user document for {line_user_id}: {e}")
+        traceback.print_exc()
         return False
-
-# --- ここから新しく追加する非同期処理 (LIFF設定保存) のための FirestoreService クラス ---
-class FirestoreService:
-    def __init__(self):
-        if settings.GCP_PROJECT_ID:
-            self.db_async = firestore.AsyncClient(project=settings.GCP_PROJECT_ID)
-        else:
-            print("Warning: GCP_PROJECT_ID is not set for AsyncClient. Firestore client will try to infer it.")
-            self.db_async = firestore.AsyncClient()
-
-    async def create_workplace(self, line_user_id: str, workplace_data: WorkplaceCreate) -> WorkplaceResponse:
-        """
-        新しいバイト先設定をFirestoreに作成する (非同期処理)
-        """
-        now = datetime.now(timezone.utc)
-
-        user_doc_ref = self.db_async.collection("users").document(line_user_id)
-        workplaces_collection_ref = user_doc_ref.collection("workplaces")
-        new_workplace_doc_ref = workplaces_collection_ref.document()
-        workplace_id = new_workplace_doc_ref.id
-
-        data_to_save = {
-            "workplace_id": workplace_id,
-            "workplace_name": workplace_data.workplace_name,
-            "settings": workplace_data.settings.dict(exclude_none=True),
-            "line_user_id": line_user_id,
-            "created_at": now, # 非同期クライアントの場合、datetimeオブジェクトを直接渡すのが一般的
-            "updated_at": now,
-        }
-
-        try:
-            await new_workplace_doc_ref.set(data_to_save)
-            print(f"Successfully created workplace '{workplace_id}' for user '{line_user_id}' (async)")
-        except Exception as e:
-            print(f"Error saving workplace to Firestore (async): {e}")
-            raise
-
-        response_data = WorkplaceResponse(
-            workplace_id=workplace_id,
-            workplace_name=workplace_data.workplace_name,
-            settings=workplace_data.settings,
-            line_user_id=line_user_id,
-            created_at=now,
-            updated_at=now,
-        )
-        return response_data
-
-    # (オプション) 特定ユーザーのシフトを取得する関数などの例 (既存のものはコメントアウトのまま)
-    # def get_user_shifts(user_id: str): # これは同期のまま
-    #     shifts = []
-    #     docs = db_sync.collection('users').document(user_id).collection('shifts').stream()
-    #     for doc in docs:
-    #         shifts.append(doc.to_dict())
-    #     return shifts
-
-    # --- 将来的にFirestoreServiceクラスに追加するかもしれない非同期メソッドのプレースホルダ ---
-    # async def get_workplace_async(self, line_user_id: str, workplace_id: str) -> Optional[WorkplaceResponse]:
-    #     # ... (非同期でバイト先設定を取得するロジック) ...
-    #     pass
