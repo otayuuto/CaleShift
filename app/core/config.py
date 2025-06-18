@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # ENVIRONMENT (オプショナル、デフォルトは "local")
     ENVIRONMENT: str = "local" # get_google_oauth_flow で使用しているため
 
+    #OPENAI API
+    OPENAI_API_KEY: Optional[str] = None
+
     # model_config などは必要に応じて
     # model_config = {
     #     "extra": "ignore"
