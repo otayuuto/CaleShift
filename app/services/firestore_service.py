@@ -13,11 +13,11 @@ from fastapi.concurrency import run_in_threadpool
 async def get_workplace_shift_rules(db_client: firestore.Client, workplace_id: str) -> Optional[str]:
     """
     指定された勤務場所IDのシフト記述ルールをFirestoreから取得します。
-    /workplaces/{workplace_id}/settings/date_rules/custom_description と
-    /workplaces/{workplace_id}/settings/time_rules/custom_description を結合して返します。
+    /workplaces/{workplace_id} の settings.date_rules.custom_description と 
+    settings.time_rules.custom_description を結合して返します。
     """
     if not db_client:
-        print("ERROR_FS_SERVICE: Firestore client (db_client) is not provided for get_workplace_shift_rules.")
+        print("ERROR_FS_SERVICE: Firestore client not provided for get_workplace_shift_rules.")
         return None
     try:
         doc_ref = db_client.collection('workplaces').document(workplace_id)
@@ -25,38 +25,54 @@ async def get_workplace_shift_rules(db_client: firestore.Client, workplace_id: s
 
         if doc_snapshot.exists:
             data = doc_snapshot.to_dict()
-            if data and 'settings' in data and isinstance(data['settings'], dict):
-                settings_data = data['settings']
-                date_rules = settings_data.get('date_rules', {})
-                time_rules = settings_data.get('time_rules', {})
+            # Firestoreの画像に基づくと、settings -> date_rules/time_rules -> custom_description
+            settings_data = data.get('settings') if data else None
+            if settings_data and isinstance(settings_data, dict):
+                date_rules_data = settings_data.get('date_rules')
+                time_rules_data = settings_data.get('time_rules')
 
-                date_rules_desc = date_rules.get('custom_description', "") if isinstance(date_rules, dict) else ""
-                time_rules_desc = time_rules.get('custom_description', "") if isinstance(time_rules, dict) else ""
+                date_desc = ""
+                if date_rules_data and isinstance(date_rules_data, dict) and \
+                   isinstance(date_rules_data.get('custom_description'), str):
+                    date_desc = date_rules_data['custom_description']
+
+                time_desc = ""
+                if time_rules_data and isinstance(time_rules_data, dict) and \
+                   isinstance(time_rules_data.get('custom_description'), str):
+                    time_desc = time_rules_data['custom_description']
                 
                 full_rules_parts = []
-                if date_rules_desc and isinstance(date_rules_desc, str):
-                    full_rules_parts.append(f"日付に関するルール: {date_rules_desc}")
-                if time_rules_desc and isinstance(time_rules_desc, str):
-                    full_rules_parts.append(f"時刻に関するルール: {time_rules_desc}")
+                if date_desc:
+                    full_rules_parts.append(f"日付に関するルール: {date_desc}")
+                if time_desc:
+                    full_rules_parts.append(f"時刻に関するルール: {time_desc}")
                 
                 if not full_rules_parts:
-                    print(f"WARNING_FS_SERVICE: No custom descriptions found in date/time rules for workplace {workplace_id}. data['settings']: {settings_data}")
-                    # フォールバックとして、より汎用的なルールを返すか、Noneを返す
-                    return "一般的なシフト表の形式で、日付、氏名、開始時間、終了時間を抽出してください。特に、日付は「X月Y日」や「YYYY/MM/DD」、時刻は「HH:MM」の形式で記述されていることが多いです。"
+                    print(f"WARNING_FS_SERVICE: No custom descriptions found for workplace {workplace_id}.")
+                    # フォールバックルール
+                    return (
+                        "日付は表の上部に記載され、曜日の下に対応する日付があります。"
+                        "時刻は各氏名の行に記載されます。"
+                        "一般的なシフト表の形式で、日付、氏名、開始時間、終了時間を抽出してください。"
+                    )
                 
                 final_rules = "\n".join(full_rules_parts)
-                print(f"INFO_FS_SERVICE: Retrieved shift rules for workplace {workplace_id}: '{final_rules[:100]}...'")
+                print(f"INFO_FS_SERVICE: Retrieved shift rules for workplace {workplace_id}: '{final_rules[:150]}...'")
                 return final_rules
             else:
-                print(f"WARNING_FS_SERVICE: 'settings' field not found or not a map in workplace document {workplace_id}.")
+                print(f"WARNING_FS_SERVICE: 'settings' field not found or not a map in workplace {workplace_id}.")
         else:
             print(f"WARNING_FS_SERVICE: Workplace document not found for ID: {workplace_id}")
-        return None # ルールが見つからない場合はNoneを返す（呼び出し側でデフォルトルールを設定）
+        # ルールが見つからない場合、呼び出し側で汎用ルールを使うか、ここで汎用ルールを返す
+        return (
+            "日付は表の上部に記載され、曜日の下に対応する日付があります。"
+            "時刻は各氏名の行に記載されます。"
+            "一般的なシフト表の形式で、日付、氏名、開始時間、終了時間を抽出してください。"
+        )
     except Exception as e:
         print(f"ERROR_FS_SERVICE: Failed to get shift rules for workplace {workplace_id}: {e}")
         traceback.print_exc()
-        return None
-
+        return None # エラー時もNoneを返す
 async def get_target_name_for_shift_extraction(
     db_client: firestore.Client,
     line_user_id: str,

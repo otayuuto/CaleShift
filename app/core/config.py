@@ -34,6 +34,7 @@ class Settings(BaseSettings):
 
     #OPENAI API
     OPENAI_API_KEY: Optional[str] = None
+    OPENAI_MODEL_NAME: str = "gpt-4.1-mini-2025-04-14"
 
     # model_config などは必要に応じて
     # model_config = {

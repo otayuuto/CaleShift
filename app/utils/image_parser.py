@@ -29,40 +29,43 @@ class ShiftInfo(BaseModel):
     @field_validator('date', mode='before')
     @classmethod
     def parse_date_str(cls, value):
+        print(f"DEBUG_VALIDATOR (date): Received value: '{value}' (type: {type(value)})") # ★ログ追加
         if isinstance(value, str):
-            # OpenAIがYYYY-MM-DDで返すと期待しているので、パースはシンプルになるはず
             try:
-                return datetime.strptime(value, "%Y-%m-%d").date()
-            except ValueError:
-                 # もしOpenAIが他の形式で返す可能性も考慮するなら、ここにもフォールバックロジック
-                print(f"WARNING_PARSER: Could not parse date '{value}' as YYYY-MM-DD. Trying other formats or original parser.")
-                # ここで以前の正規表現ベースのパーサーを呼び出すことも可能
-                # current_year = datetime.now().year ... (以前のロジック)
-                raise ValueError(f"Invalid date format from OpenAI: {value}")
+                parsed = datetime.strptime(value, "%Y-%m-%d").date()
+                print(f"DEBUG_VALIDATOR (date): Parsed to: {parsed}") # ★ログ追加
+                return parsed
+            except ValueError as e:
+                print(f"ERROR_VALIDATOR (date): Failed to parse date string '{value}': {e}")
+                raise ValueError(f"Invalid date format: {value}")
+        # ... (他の型の処理は変更なし) ...
         elif isinstance(value, datetime): return value.date()
         elif isinstance(value, date): return value
+        print(f"WARNING_VALIDATOR (date): Unexpected type for date: {type(value)}, value: {value}")
         return value
 
     @field_validator('start_time', 'end_time', mode='before')
     @classmethod
-    def parse_time_str(cls, value):
-        if value is None or isinstance(value, time): return value # None or timeならそのまま
+    def parse_time_str(cls, value, info: any = None): # info引数を追加 (Pydantic v2ではfield_validatorの第二引数はValidationInfo)
+        field_name = info.field_name if info else "unknown_field"
+        print(f"DEBUG_VALIDATOR ({field_name}): Received value: '{value}' (type: {type(value)})") # ★ログ追加
+        if value is None or isinstance(value, time): return value
         if isinstance(value, str):
-            value = value.strip()
-            if not value or value.lower() == "休み": return None
-            # OpenAIがHH:MMで返すと期待
+            value_stripped = value.strip()
+            if not value_stripped or value_stripped.lower() == "休み": return None
             try:
-                return datetime.strptime(value, "%H:%M").time()
-            except ValueError:
-                print(f"WARNING_PARSER: Could not parse time '{value}' as HH:MM. Trying original parser.")
-                # 以前の正規表現ベースのパーサー
-                # match_hm = re.fullmatch(r"(\d{1,2}):(\d{2})", value) ... (以前のロジック)
-                raise ValueError(f"Invalid time format from OpenAI: {value}")
+                parsed = datetime.strptime(value_stripped, "%H:%M").time()
+                print(f"DEBUG_VALIDATOR ({field_name}): Parsed to: {parsed}") # ★ログ追加
+                return parsed
+            except ValueError as e:
+                print(f"ERROR_VALIDATOR ({field_name}): Failed to parse time string '{value_stripped}': {e}")
+                raise ValueError(f"Invalid time format: {value_stripped}")
+        print(f"WARNING_VALIDATOR ({field_name}): Unexpected type for time: {type(value)}, value: {value}")
         return value
 
 # ★★★ メインのパース関数をOpenAIを使うように変更 ★★★
 async def parse_shift_text_to_structured_data(
-    ocr_text: str, 
+    ocr_text: str,
     line_user_id: str, # ルール取得のためにユーザーIDが必要になる場合
     db_client: Optional[Any] = None, # Firestoreクライアント (ルール取得用) # Any は firestore.Client の方が良い
     image_description: Optional[str] = None # 画像に関する補足 (オプション)
