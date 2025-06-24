@@ -29,3 +29,8 @@ if __name__ == "__main__":
     # hostを環境変数から読み込む例 (より柔軟)
     # uvicorn.run("main:app", host=settings.HOST, port=settings.PORT, reload=True)
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
+    # main.py (一時的なテスト用)
+@app.get("/ping")
+async def ping():
+    return {"message": "pong"}

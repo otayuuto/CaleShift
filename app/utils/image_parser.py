@@ -1,53 +1,75 @@
-# app/utils/image_parser.py (新規作成 - 例)
+# app/utils/image_parser.py
 import re
-from datetime import datetime
+from datetime import datetime, time, date
+from typing import List, Optional # , Dict, Any なども必要に応じて
 
-def parse_shift_text(raw_text: str) -> list[dict]:
+from pydantic import BaseModel, field_validator
+
+class ShiftInfo(BaseModel):
+    date: date
+    start_time: Optional[time] = None
+    end_time: Optional[time] = None
+    name: Optional[str] = None
+    role: Optional[str] = None
+    memo: Optional[str] = None
+    is_holiday: bool = False
+
+    model_config = {
+        "arbitrary_types_allowed": True
+    }
+
+    # ... (ここに @field_validator を使った日付や時刻のパース処理) ...
+    @field_validator('date', mode='before')
+    @classmethod
+    def parse_date_str(cls, value):
+        # ... (日付パースロジック)
+        pass # 具体的な実装は省略
+
+    @field_validator('start_time', 'end_time', mode='before')
+    @classmethod
+    def parse_time_str(cls, value):
+        # ... (時刻パースロジック)
+        pass # 具体的な実装は省略
+
+
+# ↓↓↓ この関数名が呼び出し側と一致しているか確認 ↓↓↓
+def parse_shift_text_to_structured_data(text: str) -> List[ShiftInfo]:
     """
-    Vision APIから抽出されたRAWテキストを解析し、シフト情報のリストを返す。
-    各シフト情報は辞書形式で、日付、開始時刻、終了時刻などを含む。
-    この関数は非常に単純な例であり、実際のシフト表の形式に合わせて
-    高度な解析ロジック（正規表現、キーワード抽出など）が必要。
+    Vision APIから抽出されたテキストを解析し、構造化されたシフト情報リストに変換します。
     """
-    parsed_shifts = []
-    # 例: "2024/07/20 10:00-18:00 アルバイト" のような行を探す
-    # この正規表現は非常に単純なので、実際のデータに合わせて要調整
-    pattern = re.compile(r"(\d{4}/\d{1,2}/\d{1,2})\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*(.*)")
+    parsed_shifts: List[ShiftInfo] = []
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
 
-    for line in raw_text.splitlines():
-        match = pattern.search(line)
-        if match:
-            date_str, start_time_str, end_time_str, description = match.groups()
-            try:
-                # 簡単なバリデーションと型変換 (より堅牢なエラー処理が必要)
-                shift_date = datetime.strptime(date_str, "%Y/%m/%d").date()
-                # 時刻もdatetimeオブジェクトとして扱うと後で便利
-                # start_datetime = datetime.strptime(f"{date_str} {start_time_str}", "%Y/%m/%d %H:%M")
-                # end_datetime = datetime.strptime(f"{date_str} {end_time_str}", "%Y/%m/%d %H:%M")
+    # ... (ここに、OCR結果のテキストを行ごとに、あるいは特定のパターンで解析し、
+    #      ShiftInfoオブジェクトを作成して parsed_shifts リストに追加していくロジック) ...
+    #
+    # 例えば、以前の状態管理をしながら複数行を読み進めるロジックなど
+    #
+    # current_record = {}
+    # expecting_next = 'name'
+    # table_date = ... (日付の抽出)
+    # for line_content in lines:
+    #     if expecting_next == 'name':
+    #         # ...
+    #     elif expecting_next == 'role':
+    #         # ...
+    #     # ...
+    #     if record_is_complete:
+    #         try:
+    #             shift = ShiftInfo(date=table_date, **current_record)
+    #             parsed_shifts.append(shift)
+    #         except Exception as e:
+    #             print(f"Error creating ShiftInfo: {e}")
+    #         current_record = {}
+    #         expecting_next = 'name'
 
-                parsed_shifts.append({
-                    "date": str(shift_date), # Firestoreには文字列で保存するのが無難な場合も
-                    "start_time": start_time_str,
-                    "end_time": end_time_str,
-                    "description": description.strip() if description else "シフト",
-                    "raw_line": line # 元の行も保存しておくとデバッグに便利
-                })
-            except ValueError as e:
-                print(f"Skipping line due to parsing error: {line} - {e}")
-                # logger.warning(f"Skipping line due to parsing error: {line} - {e}") # logging使う場合
 
+    print(f"INFO - image_parser - Input text (first 100 chars): {text[:100]}")
+    print(f"INFO - image_parser - Returning {len(parsed_shifts)} parsed shifts.")
     return parsed_shifts
 
-# テスト用の簡単な例
+
 if __name__ == '__main__':
-    sample_text = """
-    シフト表
-    2024/07/20 10:00-18:00 アルバイトA
-    2024/07/21 13:00 - 17:00 アルバイトB
-    休み
-    2024/07/22 09:00-15:30
-    無効な行
-    """
-    shifts = parse_shift_text(sample_text)
-    for shift in shifts:
-        print(shift)
+    # テスト用のコード
+    # ...
+    pass
