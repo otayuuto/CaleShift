@@ -1,4 +1,5 @@
 # app/utils/image_parser.py
+# app/utils/image_parser.py
 import re
 from datetime import datetime, time, date
 from typing import List, Optional # , Dict, Any なども必要に応じて
@@ -67,6 +68,7 @@ def parse_shift_text_to_structured_data(text: str) -> List[ShiftInfo]:
     print(f"INFO - image_parser - Input text (first 100 chars): {text[:100]}")
     print(f"INFO - image_parser - Returning {len(parsed_shifts)} parsed shifts.")
     return parsed_shifts
+
 
 
 if __name__ == '__main__':
