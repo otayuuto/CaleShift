@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     # ENVIRONMENT (オプショナル、デフォルトは "local")
     ENVIRONMENT: str = "local" # get_google_oauth_flow で使用しているため
 
+    #OPENAI API
+    OPENAI_API_KEY: Optional[str] = None
+    OPENAI_MODEL_NAME: str = "gpt-4.1-mini-2025-04-14"
+
     # model_config などは必要に応じて
     # model_config = {
     #     "extra": "ignore"
