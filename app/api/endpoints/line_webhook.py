@@ -33,44 +33,12 @@ line_bot_blob_api = MessagingApiBlob(api_client=ApiClient(configuration))
 
 print("INFO_LINE_WEBHOOK: LINE Messaging API clients initialized successfully.")
 
-
-async def get_user_shift_rules_and_target_name(
-    db_client: Optional[FirestoreClient], 
-    user_id: str
-) -> tuple[Optional[str], Optional[str]]:
-    """
-    Firestoreからユーザーの主要な勤務場所のシフト記述ルールと抽出対象氏名を取得する。
-    workplace_idの特定ロジックもここに含まれる。
-    """
-    if not db_client:
-        print(f"WARNING_WEBHOOK: [{user_id}] Firestore client not available for rules/name lookup.")
-        return None, None
-
-    workplace_id_to_use = await firestore_service.get_primary_workplace_id_for_user(db_client, user_id)
-    if not workplace_id_to_use:
-        print(f"WARNING_WEBHOOK: [{user_id}] Could not determine workplace_id.")
-        return None, None
-    
-    print(f"INFO_WEBHOOK: [{user_id}] Using workplace_id '{workplace_id_to_use}' for rules and target name.")
-    
-    rules = await firestore_service.get_workplace_shift_rules(db_client, workplace_id_to_use)
-    target_name = await firestore_service.get_target_name_for_shift_extraction(db_client, user_id, workplace_id_to_use)
-    
-    if not rules:
-        print(f"WARNING_WEBHOOK: [{user_id}] Shift rules not found for workplace {workplace_id_to_use}. Using generic.")
-        rules = "一般的なシフト表の形式で、日付、氏名、開始時間、終了時間を抽出してください。"
-    if not target_name:
-        print(f"WARNING_WEBHOOK: [{user_id}] Target name not found for workplace {workplace_id_to_use}.")
-        
-    return rules, target_name
-
-
 async def process_image_and_calendar_registration(
     db_client: Optional[FirestoreClient],
     user_id: str,
     message_id: str
 ):
-    final_reply_text = "画像の解析とカレンダー登録処理が完了しました。" # デフォルトメッセージ
+    final_reply_text = "画像の解析とカレンダー登録処理が完了しました。"
     created_event_ids: List[str] = []
     failed_to_create_count = 0
     parse_results_for_reply: List[str] = []
@@ -95,57 +63,50 @@ async def process_image_and_calendar_registration(
             return
         print(f"BACKGROUND_TASK_INFO: [{user_id}] Retrieved {len(image_bytes)} bytes of image data. OCR in progress...")
 
-    # --- ★★★ Vision API呼び出しをコメントアウト/削除 ★★★ ---
-        # detected_text = vision_service.detect_text_from_image_bytes(image_bytes)
-        # if not detected_text:
-        #     final_reply_text = "画像からテキストを抽出できませんでした。画像の写りを確認してください。"
-        # else:
-        # print(f"BACKGROUND_TASK_INFO: [{user_id}] Vision API OCR result (length: {len(detected_text)}).") # このログも不要に
+# --- 2. ユーザーの勤務場所ID、ルール、対象氏名を取得 (ロジックをここに統合) ---
+        workplace_id = await firestore_service.get_primary_workplace_id_for_user(db_client, user_id)
+        if not workplace_id:
+            print(f"BACKGROUND_TASK_ERROR: [{user_id}] No primary workplace found. Cannot proceed.")
+            final_reply_text = "シフトを登録する勤務場所が設定されていません。LIFFアプリから設定してください。"
+            line_bot_api.push_message(PushMessageRequest(to=user_id, messages=[MessagingTextMessage(text=final_reply_text)]))
+            return
 
-        # ★★★ Firestoreからユーザー固有のルールと対象氏名を取得 (変更なし) ★★★
-        user_shift_rules, target_name_to_extract = await get_user_shift_rules_and_target_name(db_client, user_id)
+        print(f"INFO_WEBHOOK: [{user_id}] Using workplace_id '{workplace_id}' for rules, target name, and history.")
+        user_shift_rules = await firestore_service.get_workplace_shift_rules(db_client, workplace_id)
+        target_name_to_extract = await firestore_service.get_target_name_for_shift_extraction(db_client, user_id, workplace_id)
 
         if not user_shift_rules: # ルールが取得できなかった場合のフォールバック
-            print(f"WARNING_WEBHOOK: [{user_id}] No specific shift rules found, using generic prompt for OpenAI.")
-            user_shift_rules = "提供された画像から、日付、氏名、開始時間、終了時間を抽出し、JSON形式で返してください。日付の年は、画像に年がなければ現在の年を仮定してください。"
-        
-        today_date = date.today()
-        print(f"BACKGROUND_TASK_INFO: [{user_id}] Using current date for OpenAI context: {today_date.isoformat()}")
-        print(f"BACKGROUND_TASK_INFO: [{user_id}] Requesting OpenAI for parsing. Target name: '{target_name_to_extract or 'All'}'. Rules: {user_shift_rules[:100]}...")
+            print(f"WARNING_WEBHOOK: [{user_id}] No specific shift rules found. Using generic prompt.")
+            user_shift_rules = "提供された画像から、日付、氏名、開始時間、終了時間を抽出し、JSON形式で返してください。"
 
-        openai_response_dict = await openai_service.analyze_shift_image_with_rules( # ★関数名変更
-            image_bytes=image_bytes,                 # ★ image_bytes を渡す
-            specific_rules_text=user_shift_rules,    # ★ 引数名を合わせる (openai_service.pyの定義による)
+        # --- 3. OpenAI APIを呼び出してシフト情報を解析 (画像入力バージョン) ---
+        today_date = date.today()
+        print(f"BACKGROUND_TASK_INFO: [{user_id}] Requesting OpenAI with image. Target: '{target_name_to_extract or 'All'}'.")
+        openai_response_dict = await openai_service.analyze_shift_image_with_rules(
+            image_bytes=image_bytes,
+            specific_rules_text=user_shift_rules,
             current_date_for_context=today_date,
             target_name=target_name_to_extract,
-            image_description="これは従業員の週間または月間勤務シフト表の画像です。表形式になっている可能性が高いです。" # これはそのまま
+            image_description="これは従業員の週間または月間勤務シフト表の画像です。表形式になっている可能性が高いです。"
         )
-        print(f"DEBUG_WEBHOOK: [{user_id}] Raw OpenAI response dictionary: {openai_response_dict}")
 
-        if openai_response_dict and openai_response_dict.get("shifts") is not None and isinstance(openai_response_dict.get("shifts"), list): # ★ isinstanceチェックも追加
+        # --- 4. レスポンスの解析、カレンダー登録、履歴保存 (変更なし) ---
+        if openai_response_dict and openai_response_dict.get("shifts") is not None and isinstance(openai_response_dict.get("shifts"), list):
             raw_shifts_from_openai = openai_response_dict["shifts"]
-            print(f"BACKGROUND_TASK_INFO: [{user_id}] OpenAI returned {len(raw_shifts_from_openai)} raw shift entries (before Pydantic conversion). Content: {raw_shifts_from_openai}")
-
-            if not raw_shifts_from_openai: # 空のリストの場合
+            if not raw_shifts_from_openai:
                 final_reply_text = f"AIが画像から「{target_name_to_extract or 'あなた'}」のシフト情報を見つけられませんでした。"
-                print(f"DEBUG_WEBHOOK: [{user_id}] raw_shifts_from_openai is empty. Setting reply: {final_reply_text}")
             else:
-                # このelseブロックに入っているかどうかが重要
-                print(f"DEBUG_WEBHOOK: [{user_id}] Entering loop to process {len(raw_shifts_from_openai)} raw shift entries.")
-                for i, raw_shift in enumerate(raw_shifts_from_openai):
-                    print(f"DEBUG_WEBHOOK: [{user_id}] Processing raw_shift {i+1} for Pydantic: {raw_shift}")
+                for raw_shift in raw_shifts_from_openai:
                     try:
                         shift_obj = ShiftInfo(**raw_shift)
-                        print(f"DEBUG_WEBHOOK: [{user_id}] Successfully converted to ShiftInfo: {shift_obj.model_dump_json()}")
-
+                        # target_nameのフィルタリング
                         if target_name_to_extract and shift_obj.name and target_name_to_extract.lower() not in shift_obj.name.lower():
-                            print(f"BACKGROUND_TASK_DEBUG: [{user_id}] Skipping shift for '{shift_obj.name}' (target: '{target_name_to_extract}').")
                             continue
                         parsed_shift_data_list.append(shift_obj)
                     except Exception as e_pydantic:
                         print(f"CRITICAL_WEBHOOK_ERROR: [{user_id}] Failed to convert OpenAI entry to ShiftInfo: {raw_shift}. Error: {e_pydantic}")
                         traceback.print_exc()
-                        parse_results_for_reply.append(f"- 解析エラー (データ形式不一致): {str(raw_shift)[:50]}...")
+                        parse_results_for_reply.append(f"- 解析エラー: {str(raw_shift)[:50]}...")
         else:
             final_reply_text = "AIによるシフト情報の解析に失敗しました (OpenAIからの応答が不正または期待する形式ではありません)。"
             print(f"ERROR_WEBHOOK: [{user_id}] OpenAI response was None or not in expected format. Response: {openai_response_dict}")
@@ -179,6 +140,17 @@ async def process_image_and_calendar_registration(
                 if event_id:
                     created_event_ids.append(event_id)
                     parse_results_for_reply.append(f"- {date_str}: {name_s}{start_t}～{end_t} {role_s}{memo_s} -> 登録成功".strip())
+
+                    print(f"BACKGROUND_TASK_INFO: [{user_id}] Logging successful shift to history for workplace {workplace_id}. Event ID: {event_id}")
+                    await firestore_service.log_shift_history(
+                        db_client=db_client,
+                        workplace_id=workplace_id, # ★ workplace_id を渡す
+                        line_user_id=user_id,
+                        shift_info=shift_info,
+                        calendar_event_id=event_id,
+                        status="created"
+                    )
+
                 else:
                     failed_to_create_count += 1
                     parse_results_for_reply.append(f"- {date_str}: {name_s}{start_t}～{end_t} {role_s}{memo_s} -> 登録失敗".strip())

@@ -1,10 +1,11 @@
 # app/services/firestore_service.py
 from google.cloud import firestore
 from typing import Optional, List, Dict, Any
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import traceback
 import json # 主に google_auth_service の refresh_access_token で使用
 from fastapi.concurrency import run_in_threadpool
+from app.utils.image_parser import ShiftInfo
 
 # save_google_credentials_for_user, get_google_credentials_for_user, create_initial_user_document_on_follow
 # は前回の修正で run_in_threadpool を使用しており、基本的なロジックは問題なさそうです。
@@ -229,3 +230,91 @@ async def create_initial_user_document_on_follow(
         print(f"ERROR_FIRESTORE_SERVICE: Failed to create initial user document for {line_user_id}: {e}")
         traceback.print_exc()
         return False
+async def log_shift_history(
+    db_client: firestore.Client,
+    workplace_id: str,
+    line_user_id: str,
+    shift_info: ShiftInfo,
+    calendar_event_id: str,
+    status: str = "created"
+) -> bool:
+    """
+    カレンダーに登録されたシフト情報を、指定された勤務場所のサブコレクションに保存します。
+    パス: /workplaces/{workplace_id}/shift_history/{自動ID}
+    """
+    if not db_client:
+        print("ERROR_FS_SERVICE: Firestore client not provided for log_shift_history.")
+        return False
+    if not workplace_id:
+        print("ERROR_FS_SERVICE: workplace_id is required to log shift history.")
+        return False
+    
+    try:
+        # ★★★ 保存パスを /workplaces/{workplace_id}/shift_history に変更 ★★★
+        history_collection_ref = db_client.collection('workplaces').document(workplace_id).collection('shift_history')
+        history_doc_ref = history_collection_ref.document() # ドキュメントIDは自動生成
+
+        history_data = {
+            'user_id': line_user_id, # この履歴がどのユーザーのものかを示す
+            # 'workplace_id' フィールドは不要 (親ドキュメントが示しているため)
+            
+            'date': shift_info.date.strftime("%Y-%m-%d"),
+            # 日付をまたぐシフトの場合も考慮し、開始/終了日時の両方をタイムスタンプで持つ
+            'start_time': datetime.combine(shift_info.date, shift_info.start_time).replace(tzinfo=timezone.utc),
+            'end_time': datetime.combine(shift_info.date, shift_info.end_time).replace(tzinfo=timezone.utc),
+
+            'calendar_event_id': calendar_event_id,
+            'status': status,
+            'created_at': datetime.now(timezone.utc),
+            'updated_at': datetime.now(timezone.utc)
+        }
+        
+        # 終了時刻が開始時刻より早い場合、日付を1日進める
+        if history_data['end_time'] <= history_data['start_time']:
+            history_data['end_time'] += timedelta(days=1)
+
+        # ShiftInfoの他の情報も保存
+        if shift_info.name: history_data['name_in_shift'] = shift_info.name # Firestoreのフィールド名に合わせる
+        if shift_info.role: history_data['role'] = shift_info.role
+        if shift_info.memo: history_data['memo'] = shift_info.memo
+
+        await run_in_threadpool(history_doc_ref.set, history_data)
+        
+        print(f"INFO_FS_SERVICE: Successfully logged shift to history for user {line_user_id} in workplace {workplace_id}. History Doc ID: {history_doc_ref.id}")
+        return True
+
+    except Exception as e:
+        print(f"ERROR_FS_SERVICE: Failed to log shift to history for user {line_user_id}, workplace {workplace_id}: {e}")
+        traceback.print_exc()
+        return False
+async def get_shift_history_for_user_in_workplace(
+    db_client: firestore.Client,
+    workplace_id: str,
+    line_user_id: str,
+    limit: int = 50
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    指定された勤務場所の、指定されたユーザーのシフト履歴を取得します。
+    """
+    if not db_client: return None
+    try:
+        history_collection_ref = db_client.collection('workplaces').document(workplace_id).collection('shift_history')
+        
+        query = history_collection_ref.where('user_id', '==', line_user_id) \
+                                    .order_by('start_time', direction=firestore.Query.DESCENDING) \
+                                    .limit(limit)
+        
+        docs_stream = await run_in_threadpool(query.stream)
+        history_list = []
+        for doc in docs_stream:
+            history_data = doc.to_dict()
+            if history_data:
+                history_data['history_id'] = doc.id # ドキュメントIDも追加
+                history_list.append(history_data)
+        
+        print(f"INFO_FS_SERVICE: Retrieved {len(history_list)} history entries for user {line_user_id} from workplace {workplace_id}")
+        return history_list
+    except Exception as e:
+        print(f"ERROR_FS_SERVICE: Failed to get shift history for user {line_user_id}, workplace {workplace_id}: {e}")
+        traceback.print_exc()
+        return None
