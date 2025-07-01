@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>シフト履歴一覧</title>
+    <style>
+        body { font-family: sans-serif; margin: 0; padding: 15px; background-color: #f4f4f9; }
+        h1 { text-align: center; color: #333; }
+        #shift-list { list-style: none; padding: 0; }
+        .shift-item { background-color: white; border-radius: 8px; margin-bottom: 10px; padding: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .shift-date { font-size: 1.2em; font-weight: bold; color: #4a4a4a; }
+        .shift-time { font-size: 1.1em; color: #1a73e8; margin: 5px 0; }
+        .shift-details { font-size: 0.9em; color: #666; }
+        .loading, .error, .empty { text-align: center; margin-top: 30px; font-size: 1.1em; color: #888; }
+        .error { color: red; }
+    </style>
+</head>
+<body>
+    <h1>シフト履歴</h1>
+
+    <div id="loading" class="loading">履歴を読み込んでいます...</div>
+    <ul id="shift-list"></ul>
+    <p id="empty-message" class="empty" style="display: none;">登録されているシフト履歴はありません。</p>
+    <p id="error-message" class="error" style="display: none;">履歴の読み込み中にエラーが発生しました。</p>
+
+    <script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+    <script>
+        // ★★★ あなたの新しいLIFF IDに置き換えてください ★★★
+        const MY_LIFF_ID = "2007664877-Np6kDrj1";
+        
+        document.addEventListener('DOMContentLoaded', function () {
+            initializeAndFetchShifts();
+        });
+
+        async function initializeAndFetchShifts() {
+            try {
+                console.log("Initializing LIFF for shift list...");
+                await liff.init({ liffId: MY_LIFF_ID });
+
+                if (!liff.isLoggedIn()) {
+                    liff.login({ redirectUri: window.location.href });
+                    return;
+                }
+
+                const profile = await liff.getProfile();
+                const lineUserId = profile.userId;
+                console.log("LIFF initialized. User ID:", lineUserId);
+
+                // FastAPIサーバーにシフト履歴を要求
+                // ★ workplace_id をどう特定するかが課題。
+                //    ここでは、まずユーザーの主要な勤務場所の履歴を取得すると仮定。
+                //    APIエンドポイント: /api/v1/users/{line_user_id}/shifts
+                const response = await fetch(`/api/v1/users/${lineUserId}/shifts`);
+                
+                document.getElementById('loading').style.display = 'none';
+
+                if (!response.ok) {
+                    throw new Error(`API request failed with status ${response.status}`);
+                }
+
+                const data = await response.json();
+                console.log("Received shift data:", data);
+
+                if (data.shifts && data.shifts.length > 0) {
+                    renderShiftList(data.shifts);
+                } else {
+                    document.getElementById('empty-message').style.display = 'block';
+                }
+
+            } catch (error) {
+                console.error("Failed to initialize LIFF or fetch shifts:", error);
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('error-message').style.display = 'block';
+            }
+        }
+
+        function renderShiftList(shifts) {
+            const listElement = document.getElementById('shift-list');
+            listElement.innerHTML = ''; // リストをクリア
+
+            // 日付でソート (新しいものが上)
+            shifts.sort((a, b) => new Date(b.start_time) - new Date(a.start_time));
+
+            for (const shift of shifts) {
+                const listItem = document.createElement('li');
+                listItem.className = 'shift-item';
+                
+                // Firestoreのタイムスタンプ文字列 (ISO 8601形式) をDateオブジェクトに変換
+                const startDate = new Date(shift.start_time);
+                const endDate = new Date(shift.end_time);
+
+                // 日本時間で表示するためのフォーマットオプション
+                const dateOptions = {
+                    timeZone: 'Asia/Tokyo', // タイムゾーンを日本に固定
+                    year: 'numeric',
+                    month: 'long',
+                    day: 'numeric',
+                    weekday: 'short'
+                };
+                const timeOptions = {
+                    timeZone: 'Asia/Tokyo', // タイムゾーンを日本に固定
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hour12: false
+                };
+
+                const dateStr = startDate.toLocaleDateString('ja-JP', dateOptions);
+                const startTimeStr = startDate.toLocaleTimeString('ja-JP', timeOptions);
+                const endTimeStr = endDate.toLocaleTimeString('ja-JP', timeOptions);
+                
+                const details = [];
+                if (shift.name_in_shift) details.push(`氏名: ${shift.name_in_shift}`);
+                if (shift.role) details.push(`担当: ${shift.role}`);
+                if (shift.memo) details.push(`メモ: ${shift.memo}`);
+
+                listItem.innerHTML = `
+                    <div class="shift-date">${dateStr}</div>
+                    <div class="shift-time">${startTimeStr} - ${endTimeStr}</div>
+                    <div class="shift-details">${details.join('<br>')}</div>
+                `;
+                listElement.appendChild(listItem);
+            }
+        }
+    </script>
+</body>
+</html>
