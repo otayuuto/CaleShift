@@ -5,6 +5,7 @@ from typing import List, Optional # Optional を追加 (将来的に使う可能
 from datetime import datetime # ダミーレスポンス用に datetime をインポート
 
 from app.models.setting import WorkplaceCreate, WorkplaceResponse
+from app.services.firestore_service import get_shift_history_for_user_in_workplace, get_primary_workplace_id_for_user
 # Firestore関連の関数は、必要に応じて firestore_service.py からインポートする
 # from app.services.firestore_service import (
 #     create_workplace_setting, # 仮の関数名
@@ -116,4 +117,38 @@ async def create_new_workplace(
             detail=f"An error occurred while saving the workplace settings."
         )
 
+# ★★★ LIFFからシフト履歴を取得するためのAPIエンドポイント ★★★
+@router.get("/api/v1/users/{line_user_id}/shifts", tags=["Shift History API"])
+async def get_user_shifts(request: Request, line_user_id: str):
+    """指定されたユーザーのシフト履歴を取得します。"""
+    db_client = request.app.state.db
+    if not db_client:
+        raise HTTPException(status_code=500, detail="Database connection not available.")
+
+    try:
+        # どの勤務場所の履歴を取得するか？ -> まずは主要な勤務場所とする
+        workplace_id = await get_primary_workplace_id_for_user(db_client, line_user_id)
+        if not workplace_id:
+            # 勤務場所が未設定の場合は空のリストを返す
+            return {"shifts": []}
+        
+        # Firestoreから履歴を取得
+        shift_history = await get_shift_history_for_user_in_workplace(db_client, workplace_id, line_user_id)
+        if shift_history is None: # サービス関数でエラーが発生した場合
+            raise HTTPException(status_code=500, detail="Failed to retrieve shift history.")
+        
+        return {"shifts": shift_history}
+    except Exception as e:
+        print(f"ERROR: Error in get_user_shifts endpoint for {line_user_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="An unexpected error occurred while fetching shifts.")
+
+@router.get("/liff/shifts/list", response_class=HTMLResponse, tags=["LIFF Pages"])
+async def liff_shift_list_page(request: Request):
+    """シフト履歴一覧LIFFページ (liff_shift_list.html) を表示します。"""
+    templates = request.app.state.templates
+    if templates is None:
+        raise HTTPException(status_code=500, detail="Server configuration error: Template engine not found.")
+    return templates.TemplateResponse("liff_shift_list.html", {"request": request})
 # (将来のGET, PUT, DELETEエンドポイントも同様)
