@@ -1,5 +1,5 @@
 # app/api/endpoints/line_webhook.py
-from fastapi import APIRouter, Request, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, Request, HTTPException, BackgroundTasks
 from linebot.v3.webhook import WebhookHandler # WebhookHandler を直接使う
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -21,6 +21,10 @@ from app.utils.image_parser import ShiftInfo # Pydanticモデルとして使用
 from fastapi.concurrency import run_in_threadpool # Firestore呼び出し用
 from datetime import date
 
+from app.api.dependencies import get_db_service
+from app.services.firestore_service import FirestoreService
+
+
 router = APIRouter()
 
 # WebhookHandlerのインスタンスを作成 (署名検証とイベントパースに使用)
@@ -34,7 +38,7 @@ line_bot_blob_api = MessagingApiBlob(api_client=ApiClient(configuration))
 print("INFO_LINE_WEBHOOK: LINE Messaging API clients initialized successfully.")
 
 async def process_image_and_calendar_registration(
-    db_client: Optional[FirestoreClient],
+    db_service: FirestoreService,
     user_id: str,
     message_id: str
 ):
@@ -45,10 +49,6 @@ async def process_image_and_calendar_registration(
     parsed_shift_data_list: List[ShiftInfo] = []
 
     try:
-        if not db_client:
-            final_reply_text = "データベース接続エラーが発生しました。管理者にご連絡ください。"
-            line_bot_api.push_message(PushMessageRequest(to=user_id, messages=[MessagingTextMessage(text=final_reply_text)]))
-            return
 
         print(f"BACKGROUND_TASK_INFO: [{user_id}] Started image processing for message_id: {message_id}")
         message_content_response = line_bot_blob_api.get_message_content(message_id=message_id)
@@ -64,7 +64,7 @@ async def process_image_and_calendar_registration(
         print(f"BACKGROUND_TASK_INFO: [{user_id}] Retrieved {len(image_bytes)} bytes of image data. OCR in progress...")
 
 # --- 2. ユーザーの勤務場所ID、ルール、対象氏名を取得 (ロジックをここに統合) ---
-        workplace_id = await firestore_service.get_primary_workplace_id_for_user(db_client, user_id)
+        workplace_id = await db_service.get_primary_workplace_id_for_user(user_id)
         if not workplace_id:
             print(f"BACKGROUND_TASK_ERROR: [{user_id}] No primary workplace found. Cannot proceed.")
             final_reply_text = "シフトを登録する勤務場所が設定されていません。LIFFアプリから設定してください。"
@@ -72,8 +72,8 @@ async def process_image_and_calendar_registration(
             return
 
         print(f"INFO_WEBHOOK: [{user_id}] Using workplace_id '{workplace_id}' for rules, target name, and history.")
-        user_shift_rules = await firestore_service.get_workplace_shift_rules(db_client, workplace_id)
-        target_name_to_extract = await firestore_service.get_target_name_for_shift_extraction(db_client, user_id, workplace_id)
+        user_shift_rules = await db_service.get_workplace_shift_rules(workplace_id)
+        target_name_to_extract = await db_service.get_target_name_for_shift_extraction(user_id, workplace_id)
 
         if not user_shift_rules: # ルールが取得できなかった場合のフォールバック
             print(f"WARNING_WEBHOOK: [{user_id}] No specific shift rules found. Using generic prompt.")
@@ -136,18 +136,17 @@ async def process_image_and_calendar_registration(
                 end_t = shift_info.end_time.strftime("%H:%M")
                 memo_s = f" [{shift_info.memo}]" if shift_info.memo else ""
                 
-                event_id = await calendar_service.create_calendar_event(db_client, user_id, shift_info)
+                event_id = await calendar_service.create_calendar_event(db_service, user_id, shift_info)
                 if event_id:
                     created_event_ids.append(event_id)
                     parse_results_for_reply.append(f"- {date_str}: {name_s}{start_t}～{end_t} {role_s}{memo_s} -> 登録成功".strip())
 
                     print(f"BACKGROUND_TASK_INFO: [{user_id}] Logging successful shift to history for workplace {workplace_id}. Event ID: {event_id}")
-                    await firestore_service.log_shift_history(
-                        db_client=db_client,
-                        workplace_id=workplace_id, # ★ workplace_id を渡す
+                    await db_service.log_shift_history( # db_service経由で呼び出す
+                        workplace_id=workplace_id,
                         line_user_id=user_id,
                         shift_info=shift_info,
-                        calendar_event_id=event_id,
+                        calendar_event_id=event_id, # ★★★ ここで定義済みの event_id を渡す ★★★
                         status="created"
                     )
 
@@ -192,13 +191,17 @@ async def process_image_and_calendar_registration(
 
 
 @router.post("/callback", summary="LINE Bot Webhook callback")
-async def line_webhook_callback(request: Request, background_tasks: BackgroundTasks):
+async def line_webhook_callback(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db_service: FirestoreService = Depends(get_db_service)
+):
     signature = request.headers.get("X-Line-Signature")
     if not signature: raise HTTPException(status_code=400, detail="X-Line-Signature header not found")
     body_bytes = await request.body()
     body = body_bytes.decode('utf-8')
     print(f"INFO_WEBHOOK: Received webhook body (first 500 chars): {body[:500]}...")
-    db_client = request.app.state.db
+    # db_service = request.app.state.db
     try:
         events = line_webhook_handler.parser.parse(body, signature) # parserだけ使う
     except InvalidSignatureError: # ... (エラー処理)
@@ -223,13 +226,18 @@ async def line_webhook_callback(request: Request, background_tasks: BackgroundTa
                     print(f"INFO_WEBHOOK: Sent ACK to {user_id} for image message.")
                 except Exception as e_ack:
                     print(f"ERROR_WEBHOOK: Failed to send ACK for image message to {user_id}: {e_ack}")
-                background_tasks.add_task(process_image_and_calendar_registration, db_client, user_id, event.message.id)
+                background_tasks.add_task(
+                    process_image_and_calendar_registration,
+                    db_service,
+                    user_id,
+                    event.message.id
+                )
             elif isinstance(event.message, WebhookTextMessageContent):
                 handle_text_message_sync(event)
             else:
                 print(f"INFO_WEBHOOK: Received other message type from {user_id}: {event.message.type}")
         elif isinstance(event, FollowEvent):
-            await handle_follow_event(db_client, event)
+            await handle_follow_event(db_service, event)
         else:
             print(f"INFO_WEBHOOK: Received other event type: {event.type}")
     return "OK"
@@ -249,16 +257,16 @@ def handle_text_message_sync(event: MessageEvent): # 同期関数のまま
         print(f"ERROR_WEBHOOK: Error sending text reply for {user_id}: {e}")
         traceback.print_exc()
 
-async def handle_follow_event(db_client: Optional[FirestoreClient], event: FollowEvent):
+async def handle_follow_event(db_service: FirestoreService, event: FollowEvent):
     line_user_id = event.source.user_id
     reply_token = event.reply_token
     print(f"INFO_WEBHOOK: User {line_user_id} followed the bot.")
-    if not db_client: # ... (エラー処理)
-        print(f"ERROR_WEBHOOK: Firestore client not available in handle_follow_event for {line_user_id}")
+    if not db_service:
+        print(f"ERROR_WEBHOOK: FirestoreService not available in handle_follow_event for {line_user_id}")
         return
     display_name = None # Profile API呼び出しは省略
     print(f"INFO_WEBHOOK: [FollowEvent] Display name acquisition skipped for simplicity for {line_user_id}.")
-    success = await firestore_service.create_initial_user_document_on_follow(db_client, line_user_id, display_name)
+    success = await db_service.create_initial_user_document_on_follow(line_user_id, display_name)
     if success:
         message_text = "友だち追加ありがとうございます！シフト管理ボットです。"
         if settings.NGROK_URL:

@@ -1,5 +1,5 @@
 # app/api/endpoints/google_auth.py
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import RedirectResponse
 from typing import Optional
 
@@ -8,13 +8,15 @@ from app.services.google_auth_service import generate_auth_url, exchange_code_fo
 
 from app.core.config import settings
 # firestore_service から関数を直接インポート
-from app.services.firestore_service import save_google_credentials_for_user
 # from app.services.firestore_service import get_google_credentials_for_user # 必要なら
+from app.api.dependencies import get_db_service
+from app.services.firestore_service import FirestoreService
+
 
 router = APIRouter()
 
 @router.get("/login", summary="Redirect to Google OAuth consent screen")
-async def login_via_google(request: Request, line_id: Optional[str] = None): # line_id をクエリパラメータとして受け取れるように変更
+async def login_via_google(request: Request, db_service: FirestoreService = Depends(get_db_service) , line_id: Optional[str] = None): # line_id をクエリパラメータとして受け取れるように変更
     """
     ユーザーをGoogleの認証ページにリダイレクトします。
     stateとLINE User IDをセッションに保存します。
@@ -83,13 +85,13 @@ async def google_auth_callback(request: Request, code: Optional[str] = None, err
     scopes_list = credentials.scopes if credentials.scopes else []
 
     # ★★★ Firestoreクライアントを app.state から取得して渡す ★★★
-    db_client = request.app.state.db 
-    if not db_client:
-        print("CRITICAL_ERROR: Firestore client not found in app.state during callback.")
-        raise HTTPException(status_code=500, detail="Database connection not available. Please contact administrator.")
+    # db_client = request.app.state.db 
+    # if not db_client:
+    #     print("CRITICAL_ERROR: Firestore client not found in app.state during callback.")
+    #     raise HTTPException(status_code=500, detail="Database connection not available. Please contact administrator.")
 
-    save_success = await save_google_credentials_for_user(
-        db_client, # ★ Firestoreクライアントを渡す
+    save_success = await db_service.save_google_credentials_for_user(
+        # db_client, # ★ Firestoreクライアントを渡す
         line_user_id,
         credentials_json,
         scopes_list
