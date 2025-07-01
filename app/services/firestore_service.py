@@ -1,98 +1,149 @@
+# app/services/firestore_service.py
 
-from google.cloud import firestore_v1 as firestore # firestore_v1.Client と firestore_v1.AsyncClient を使用
+from google.cloud import firestore_v1 as firestore
 from datetime import datetime, timezone
+import traceback
+from typing import List, Optional
 
-from app.core.config import settings # GCP_PROJECT_ID を使う場合
-from app.models.setting import WorkplaceCreate, WorkplaceResponse # LIFF設定保存用のPydanticモデル
+from app.core.config import settings
+from app.models.setting import (
+    WorkplaceCreatePayload, WorkplaceResponse,
+    MyWorkplaceSettingCreatePayload, MyWorkplaceSettingResponse,
+    WorkplaceSharedSettings # get_all_shared_workplaces で使う可能性
+)
 
-# --- 既存の同期処理 (save_parsed_shifts) のためのFirestoreクライアント ---
-# この部分は変更しません
-db_sync = firestore.Client(project=settings.GCP_PROJECT_ID if settings.GCP_PROJECT_ID else None)
+# --- 既存の同期処理 (save_parsed_shifts) はそのまま ---
+if settings.GCP_PROJECT_ID:
+    db_sync = firestore.Client(project=settings.GCP_PROJECT_ID, database="caleshiftdb")
+else:
+    print("Warning: GCP_PROJECT_ID is not set for sync client.")
+    db_sync = firestore.Client(database="caleshiftdb")
 
 def save_parsed_shifts(user_id: str, shifts: list[dict]):
-    """
-    解析されたシフト情報をユーザーごとにFirestoreに保存する。(同期処理)
-    Args:
-        user_id: LINEユーザーID
-        shifts: 解析されたシフト情報のリスト (各要素は辞書)
-    """
     if not shifts:
         print(f"No shifts to save for user {user_id}.")
         return False
-
     try:
-        batch = db_sync.batch() # 既存の同期クライアント db_sync を使用
+        batch = db_sync.batch()
         user_shifts_collection = db_sync.collection('users').document(user_id).collection('shifts')
-
         for shift_data in shifts:
             doc_ref = user_shifts_collection.document()
             data_to_save = shift_data.copy()
             data_to_save['line_user_id'] = user_id
-            # 同期クライアントでは firestore.SERVER_TIMESTAMP を使用
-            data_to_save['created_at'] = firestore. अभी # または firestore.SERVER_TIMESTAMP
+            data_to_save['created_at'] = firestore.SERVER_TIMESTAMP
             batch.set(doc_ref, data_to_save)
         batch.commit()
         print(f"Successfully saved {len(shifts)} shifts for user {user_id} to Firestore.")
         return True
     except Exception as e:
         print(f"Error saving shifts for user {user_id} to Firestore: {e}")
+        traceback.print_exc()
         return False
 
-# --- ここから新しく追加する非同期処理 (LIFF設定保存) のための FirestoreService クラス ---
+# --- FirestoreService クラスのメソッド追加・変更 ---
 class FirestoreService:
     def __init__(self):
         if settings.GCP_PROJECT_ID:
-            self.db_async = firestore.AsyncClient(project=settings.GCP_PROJECT_ID)
+            self.db_async = firestore.AsyncClient(project=settings.GCP_PROJECT_ID, database="caleshiftdb")
         else:
-            print("Warning: GCP_PROJECT_ID is not set for AsyncClient. Firestore client will try to infer it.")
-            self.db_async = firestore.AsyncClient()
+            print("Warning: GCP_PROJECT_ID is not set for AsyncClient.")
+            self.db_async = firestore.AsyncClient(database="caleshiftdb")
 
-    async def create_workplace(self, line_user_id: str, workplace_data: WorkplaceCreate) -> WorkplaceResponse:
-        """
-        新しいバイト先設定をFirestoreに作成する (非同期処理)
-        """
+    async def create_shared_workplace_info(self, payload: WorkplaceCreatePayload) -> WorkplaceResponse:
         now = datetime.now(timezone.utc)
-
-        user_doc_ref = self.db_async.collection("users").document(line_user_id)
-        workplaces_collection_ref = user_doc_ref.collection("workplaces")
+        workplaces_collection_ref = self.db_async.collection("workplaces")
         new_workplace_doc_ref = workplaces_collection_ref.document()
         workplace_id = new_workplace_doc_ref.id
 
         data_to_save = {
             "workplace_id": workplace_id,
-            "workplace_name": workplace_data.workplace_name,
-            "settings": workplace_data.settings.dict(exclude_none=True),
-            "line_user_id": line_user_id,
-            "created_at": now, # 非同期クライアントの場合、datetimeオブジェクトを直接渡すのが一般的
+            "workplace_name": payload.workplace_name,
+            "settings": payload.settings.dict(exclude_none=True),
+            "created_by_user_id": payload.current_line_user_id,
+            "created_at": now,
             "updated_at": now,
         }
-
         try:
             await new_workplace_doc_ref.set(data_to_save)
-            print(f"Successfully created workplace '{workplace_id}' for user '{line_user_id}' (async)")
+            print(f"Successfully created shared workplace '{workplace_id}' by user '{payload.current_line_user_id}'")
         except Exception as e:
-            print(f"Error saving workplace to Firestore (async): {e}")
+            print("--- Error in create_shared_workplace_info ---")
+            traceback.print_exc()
             raise
+        return WorkplaceResponse(**data_to_save)
 
-        response_data = WorkplaceResponse(
-            workplace_id=workplace_id,
-            workplace_name=workplace_data.workplace_name,
-            settings=workplace_data.settings,
-            line_user_id=line_user_id,
-            created_at=now,
-            updated_at=now,
-        )
-        return response_data
+    async def get_all_shared_workplaces(self) -> List[WorkplaceResponse]:
+        workplaces_collection_ref = self.db_async.collection("workplaces")
+        workplaces_list: List[WorkplaceResponse] = []
+        print("Attempting to retrieve all shared workplaces...")
+        try:
+            async for doc_snapshot in workplaces_collection_ref.stream():
+                # ↓ tryブロック内のインデントも揃える (例: さらにスペース4つ)
+                if doc_snapshot.exists:
+                    data = doc_snapshot.to_dict()
+                    print(f"Processing document ID: {doc_snapshot.id}, Data: {data}")
+                    try:
+                        if data and "settings" in data and isinstance(data["settings"], dict):
+                           data["settings"] = WorkplaceSharedSettings(**data["settings"])
+                        workplaces_list.append(WorkplaceResponse(**data))
+                    except Exception as pydantic_error:
+                        print(f"--- Pydantic Validation Error for Document ID: {doc_snapshot.id} ---")
+                        print(f"Raw Data: {data}")
+                        print(f"Pydantic Error: {pydantic_error}")
+                        traceback.print_exc()
+                        print("--------------------------------------------------------------------")
+            print(f"Successfully processed. Number of valid workplaces retrieved: {len(workplaces_list)}")
+        except Exception as e:
+            print("--------------------------------------------------")
+            print(f"Error retrieving all shared workplaces from Firestore:")
+            print(f"Error type: {type(e)}")
+            print(f"Error message: {str(e)}")
+            print("Traceback:")
+            traceback.print_exc()
+            print("--------------------------------------------------")
+            raise
+        return workplaces_list 
 
-    # (オプション) 特定ユーザーのシフトを取得する関数などの例 (既存のものはコメントアウトのまま)
-    # def get_user_shifts(user_id: str): # これは同期のまま
-    #     shifts = []
-    #     docs = db_sync.collection('users').document(user_id).collection('shifts').stream()
-    #     for doc in docs:
-    #         shifts.append(doc.to_dict())
-    #     return shifts
+    async def set_user_target_name_for_workplace(
+        self, line_user_id: str, workplace_id: str, payload: MyWorkplaceSettingCreatePayload
+    ) -> MyWorkplaceSettingResponse:
+        now = datetime.now(timezone.utc)
+        setting_doc_ref = self.db_async.collection("users").document(line_user_id)\
+                                     .collection("my_workplace_settings").document(workplace_id)
+        data_to_save = {
+            "workplace_id": workplace_id,
+            "line_user_id": line_user_id,
+            "target_name_in_shift": payload.target_name_in_shift,
+            "updated_at": now,
+        }
+        try:
+            doc_snapshot = await setting_doc_ref.get()
+            if not doc_snapshot.exists:
+                data_to_save["linked_at"] = now
+            else:
+                existing_data = doc_snapshot.to_dict()
+                data_to_save["linked_at"] = existing_data.get("linked_at", now) # 既存がなければ今
 
-    # --- 将来的にFirestoreServiceクラスに追加するかもしれない非同期メソッドのプレースホルダ ---
-    # async def get_workplace_async(self, line_user_id: str, workplace_id: str) -> Optional[WorkplaceResponse]:
-    #     # ... (非同期でバイト先設定を取得するロジック) ...
-    #     pass
+            await setting_doc_ref.set(data_to_save, merge=True)
+            print(f"Successfully set/updated target_name for user '{line_user_id}', workplace '{workplace_id}'")
+        except Exception as e:
+            print("--- Error in set_user_target_name_for_workplace ---")
+            traceback.print_exc()
+            raise
+        return MyWorkplaceSettingResponse(**data_to_save)
+
+    async def get_user_target_name_for_workplace(
+        self, line_user_id: str, workplace_id: str
+    ) -> Optional[MyWorkplaceSettingResponse]:
+        setting_doc_ref = self.db_async.collection("users").document(line_user_id)\
+                                     .collection("my_workplace_settings").document(workplace_id)
+        try:
+            doc_snapshot = await setting_doc_ref.get()
+            if doc_snapshot.exists:
+                data = doc_snapshot.to_dict()
+                return MyWorkplaceSettingResponse(**data)
+            return None
+        except Exception as e:
+            print("--- Error in get_user_target_name_for_workplace ---")
+            traceback.print_exc()
+            raise
