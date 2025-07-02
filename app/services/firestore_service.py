@@ -136,6 +136,7 @@ class FirestoreService:
                 history_data = doc.to_dict()
                 if history_data:
                     history_data['history_id'] = doc.id
+                    history_data['workplace_id'] = workplace_id
                     history_list.append(history_data)
             print(f"INFO_FS_SERVICE: Retrieved {len(history_list)} history entries for {line_user_id} from wp {workplace_id}")
             return history_list
@@ -214,6 +215,35 @@ class FirestoreService:
         await new_workplace_doc_ref.set(data_to_save)
         return WorkplaceResponse(**data_to_save)
 
-    # get_all_shared_workplaces, set_user_target_name_for_workplace など、
-    # origin/aoshi にあった他のメソッドも同様にこのクラス内に実装する
-    # ...
+    async def get_shift_history_item(self, workplace_id: str, history_id: str) -> Optional[Dict[str, Any]]:
+        """単一のシフト履歴ドキュメントを取得します。"""
+        if not self.db_async: return None
+        try:
+            doc_ref = self.db_async.collection('workplaces').document(workplace_id).collection('shift_history').document(history_id)
+            doc = await doc_ref.get()
+            return doc.to_dict() if doc.exists else None
+        except Exception as e: # ...
+            return None
+
+    async def update_shift_history(self, workplace_id: str, history_id: str, update_data: Dict[str, Any]) -> bool:
+        """シフト履歴ドキュメントを更新します。"""
+        if not self.db_async: return False
+        try:
+            doc_ref = self.db_async.collection('workplaces').document(workplace_id).collection('shift_history').document(history_id)
+            update_data['updated_at'] = datetime.now(timezone.utc)
+            await doc_ref.update(update_data)
+            print(f"INFO_FS_SERVICE: Updated shift history doc: {workplace_id}/{history_id}")
+            return True
+        except Exception as e: # ...
+            return False
+
+    async def delete_shift_history(self, workplace_id: str, history_id: str) -> bool:
+        """シフト履歴ドキュメントを削除します。"""
+        if not self.db_async: return False
+        try:
+            doc_ref = self.db_async.collection('workplaces').document(workplace_id).collection('shift_history').document(history_id)
+            await doc_ref.delete()
+            print(f"INFO_FS_SERVICE: Deleted shift history doc: {workplace_id}/{history_id}")
+            return True
+        except Exception as e: # ...
+            return False

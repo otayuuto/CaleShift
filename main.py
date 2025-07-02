@@ -7,6 +7,8 @@ from starlette.middleware.sessions import SessionMiddleware # ★ from HEAD
 from pathlib import Path
 import traceback
 
+from app.api.endpoints import shift_management
+
 # 設定ファイルをインポート
 from app.core.config import settings
 
@@ -90,7 +92,7 @@ else:
 # ★★★ APIルーターのインクルード ★★★
 app.include_router(api_router, prefix=settings.API_V1_STR)
 app.include_router(liff_settings.router, tags=["LIFF"])
-
+app.include_router(shift_management.router)
 
 # ★★★ ルートとデバッグエンドポイント ★★★
 @app.get("/", tags=["Root"])
