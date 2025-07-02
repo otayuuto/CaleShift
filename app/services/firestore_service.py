@@ -136,6 +136,7 @@ class FirestoreService:
                 history_data = doc.to_dict()
                 if history_data:
                     history_data['history_id'] = doc.id
+                    history_data['workplace_id'] = workplace_id
                     history_list.append(history_data)
             print(f"INFO_FS_SERVICE: Retrieved {len(history_list)} history entries for {line_user_id} from wp {workplace_id}")
             return history_list
@@ -214,6 +215,93 @@ class FirestoreService:
         await new_workplace_doc_ref.set(data_to_save)
         return WorkplaceResponse(**data_to_save)
 
-    # get_all_shared_workplaces, set_user_target_name_for_workplace など、
-    # origin/aoshi にあった他のメソッドも同様にこのクラス内に実装する
-    # ...
+    async def get_shift_history_item(self, workplace_id: str, history_id: str) -> Optional[Dict[str, Any]]:
+        """単一のシフト履歴ドキュメントを取得します。"""
+        if not self.db_async: return None
+        try:
+            doc_ref = self.db_async.collection('workplaces').document(workplace_id).collection('shift_history').document(history_id)
+            doc = await doc_ref.get()
+            return doc.to_dict() if doc.exists else None
+        except Exception as e: # ...
+            return None
+
+    async def update_shift_history(self, workplace_id: str, history_id: str, update_data: Dict[str, Any]) -> bool:
+        """シフト履歴ドキュメントを更新します。"""
+        if not self.db_async: return False
+        try:
+            doc_ref = self.db_async.collection('workplaces').document(workplace_id).collection('shift_history').document(history_id)
+            update_data['updated_at'] = datetime.now(timezone.utc)
+            await doc_ref.update(update_data)
+            print(f"INFO_FS_SERVICE: Updated shift history doc: {workplace_id}/{history_id}")
+            return True
+        except Exception as e: # ...
+            return False
+
+    async def delete_shift_history(self, workplace_id: str, history_id: str) -> bool:
+        """シフト履歴ドキュメントを削除します。"""
+        if not self.db_async: return False
+        try:
+            doc_ref = self.db_async.collection('workplaces').document(workplace_id).collection('shift_history').document(history_id)
+            await doc_ref.delete()
+            print(f"INFO_FS_SERVICE: Deleted shift history doc: {workplace_id}/{history_id}")
+            return True
+        except Exception as e: # ...
+            return False
+    async def save_pending_shifts(
+        self,
+        line_user_id: str,
+        workplace_id: str,
+        parsed_shifts: List[Dict[str, Any]] # Pydanticオブジェクトを辞書に変換して渡す
+    ) -> Optional[str]:
+        """
+        解析されたシフト情報を一時的なコレクションに保存し、ドキュメントIDを返す。
+        """
+        if not self.db_async: return None
+        try:
+            # pending_shifts コレクションに新しいドキュメントを作成 (IDは自動生成)
+            pending_doc_ref = self.db_async.collection('pending_shifts').document()
+            
+            pending_data = {
+                "line_user_id": line_user_id,
+                "workplace_id": workplace_id,
+                "parsed_shifts": parsed_shifts, # 辞書のリスト
+                "status": "pending",
+                "created_at": datetime.now(timezone.utc),
+                "expires_at": datetime.now(timezone.utc) + timedelta(hours=24) # 例: 24時間の有効期限
+            }
+
+            await pending_doc_ref.set(pending_data)
+            pending_id = pending_doc_ref.id
+            print(f"INFO_FS_SERVICE: Saved pending shifts for user {line_user_id}. Pending ID: {pending_id}")
+            return pending_id
+        except Exception as e:
+            print(f"ERROR_FS_SERVICE: Failed to save pending shifts for user {line_user_id}: {e}")
+            traceback.print_exc()
+            return None
+
+    async def get_pending_shifts(self, pending_id: str) -> Optional[Dict[str, Any]]:
+        """
+        指定されたIDの保留中シフト情報を取得します。
+        """
+        if not self.db_async: return None
+        try:
+            doc_ref = self.db_async.collection('pending_shifts').document(pending_id)
+            doc = await doc_ref.get()
+            if doc.exists:
+                return doc.to_dict()
+            else:
+                print(f"WARNING_FS_SERVICE: Pending shifts document not found for ID: {pending_id}")
+                return None
+        except Exception as e:
+            print(f"ERROR_FS_SERVICE: Failed to get pending shifts for ID {pending_id}: {e}")
+            traceback.print_exc()
+            return None
+
+    # (参考) 古い保留データを削除する関数 (Cloud Functionsなどで定期実行すると良い)
+    # async def delete_expired_pending_shifts(self):
+    #     if not self.db_async: return
+    #     now = datetime.now(timezone.utc)
+    #     query = self.db_async.collection('pending_shifts').where('expires_at', '<', now)
+    #     async for doc in query.stream():
+    #         await doc.reference.delete()
+    #         print(f"Deleted expired pending shift: {doc.id}")

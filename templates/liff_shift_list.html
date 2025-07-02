@@ -14,6 +14,50 @@
         .shift-details { font-size: 0.9em; color: #666; }
         .loading, .error, .empty { text-align: center; margin-top: 30px; font-size: 1.1em; color: #888; }
         .error { color: red; }
+        .actions { margin-top: 10px; text-align: right; }
+        .actions button { margin-left: 5px; padding: 5px 10px; font-size: 14px; border: 1px solid #ccc; background-color: #f9f9f9; border-radius: 4px; }
+        .actions .delete-btn { border-color: #d9534f; color: #d9534f; }
+
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.6);
+            display: none; /* 初期状態は非表示 */
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        .modal-content {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            width: 90%;
+            max-width: 400px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
+        .modal-content h2 { margin-top: 0; }
+        .modal-form label { display: block; margin-bottom: 5px; font-weight: bold; }
+        .modal-form input[type="date"], .modal-form input[type="time"] {
+            width: calc(100% - 20px);
+            padding: 8px;
+            margin-bottom: 15px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 16px;
+        }
+        .modal-actions { text-align: right; margin-top: 20px; }
+        .modal-actions button {
+            padding: 8px 16px;
+            border-radius: 4px;
+            border: none;
+            cursor: pointer;
+            margin-left: 10px;
+        }
+        .modal-actions .save-btn { background-color: #1a73e8; color: white; }
+        .modal-actions .cancel-btn { background-color: #ccc; }
     </style>
 </head>
 <body>
@@ -23,6 +67,36 @@
     <ul id="shift-list"></ul>
     <p id="empty-message" class="empty" style="display: none;">登録されているシフト履歴はありません。</p>
     <p id="error-message" class="error" style="display: none;">履歴の読み込み中にエラーが発生しました。</p>
+
+    <div id="edit-modal" class="modal-overlay">
+        <div class="modal-content">
+            <h2>シフト情報を編集</h2>
+            <form id="edit-form" class="modal-form">
+                <!-- 編集対象のIDを保持するための非表示フィールド -->
+                <input type="hidden" id="edit-workplace-id">
+                <input type="hidden" id="edit-history-id">
+                <input type="hidden" id="edit-event-id">
+
+                <label for="edit-date">日付:</label>
+                <input type="date" id="edit-date" required>
+
+                <label for="edit-start-time">開始時刻:</label>
+                <input type="time" id="edit-start-time" required>
+
+                <label for="edit-end-time">終了時刻:</label>
+                <input type="time" id="edit-end-time" required>
+                
+                <!-- (オプション) メモなどの編集もここに追加可能 -->
+                <!-- <label for="edit-memo">メモ:</label> -->
+                <!-- <input type="text" id="edit-memo"> -->
+
+                <div class="modal-actions">
+                    <button type="button" class="cancel-btn" onclick="closeEditModal()">キャンセル</button>
+                    <button type="submit" class="save-btn">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
 
     <script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
     <script>
@@ -75,7 +149,10 @@
             }
         }
 
+        let allShiftsData = []
+
         function renderShiftList(shifts) {
+            allShiftsData = shifts;
             const listElement = document.getElementById('shift-list');
             listElement.innerHTML = ''; // リストをクリア
 
@@ -115,13 +192,139 @@
                 if (shift.memo) details.push(`メモ: ${shift.memo}`);
 
                 listItem.innerHTML = `
-                    <div class="shift-date">${dateStr}</div>
-                    <div class="shift-time">${startTimeStr} - ${endTimeStr}</div>
-                    <div class="shift-details">${details.join('<br>')}</div>
+                <div class="shift-date">${dateStr}</div>
+                <div class="shift-time">${startTimeStr} - ${endTimeStr}</div>
+                <div class="shift-details">${details.join('<br>')}</div>
+                <div class="actions">
+                    <button onclick="editShift('${shift.workplace_id}', '${shift.history_id}')">編集</button>
+                    <button class="delete-btn" onclick="deleteShift('${shift.workplace_id}', '${shift.history_id}')">削除</button>
+                </div>
                 `;
                 listElement.appendChild(listItem);
             }
         }
+
+         // ★★★ 削除処理の関数を追加 ★★★
+    async function deleteShift(workplaceId, historyId) {
+        if (!confirm('このシフトを削除しますか？\nGoogleカレンダーからも削除されます。')) {
+            return;
+        }
+        if (!workplaceId || workplaceId === 'undefined' || !historyId) {
+            alert('削除対象のシフト情報が正しくありません。');
+            console.error('deleteShift called with invalid arguments:', { workplaceId, historyId });
+            return;
+        }
+        try {
+            const response = await fetch(`/api/v1/workplaces/${workplaceId}/shifts/${historyId}`, {
+                method: 'DELETE',
+                headers: {
+                    // TODO: 認証トークン (LIFFのIDトークンなど) を追加
+                    // 'Authorization': 'Bearer ' + liff.getIDToken()
+                }
+            });
+            if (response.ok) { // 204 No Content は ok が true になる
+                alert('シフトを削除しました。');
+                // 画面を再読み込みしてリストを更新
+                window.location.reload();
+            } else {
+                const errorData = await response.json();
+                alert(`削除に失敗しました: ${errorData.detail || '不明なエラー'}`);
+            }
+        } catch (error) {
+            console.error('Error deleting shift:', error);
+            alert('削除処理中にエラーが発生しました。');
+        }
+    }
+
+    // ★★★ 編集処理の関数を追加 ★★★
+    function editShift(workplaceId, historyId) {
+            // allShiftsDataから編集対象のシフトデータを検索
+            const shiftToEdit = allShiftsData.find(s => s.history_id === historyId && s.workplace_id === workplaceId);
+            if (!shiftToEdit) {
+                alert('編集対象のシフトが見つかりませんでした。');
+                return;
+            }
+
+            // フォームに現在の値をセット
+            document.getElementById('edit-workplace-id').value = workplaceId;
+            document.getElementById('edit-history-id').value = historyId;
+            document.getElementById('edit-event-id').value = shiftToEdit.calendar_event_id;
+
+            // Firestoreのタイムスタンプ文字列を日本の日付/時刻に変換してセット
+            const startDate = new Date(shiftToEdit.start_time);
+            const endDate = new Date(shiftToEdit.end_time);
+
+            // YYYY-MM-DD 形式
+            const yyyy = startDate.getFullYear();
+            const mm = String(startDate.getMonth() + 1).padStart(2, '0');
+            const dd = String(startDate.getDate()).padStart(2, '0');
+            document.getElementById('edit-date').value = `${yyyy}-${mm}-${dd}`;
+
+            // HH:mm 形式
+            document.getElementById('edit-start-time').value = startDate.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', hour12: false });
+            document.getElementById('edit-end-time').value = endDate.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', hour12: false });
+
+            // モーダルを表示
+            document.getElementById('edit-modal').style.display = 'flex';
+        }
+
+        // ★★★ 編集モーダルを閉じる関数 ★★★
+        function closeEditModal() {
+            document.getElementById('edit-modal').style.display = 'none';
+        }
+
+        // ★★★ 編集フォームの送信イベントを処理 ★★★
+        document.getElementById('edit-form').addEventListener('submit', async function(event) {
+            event.preventDefault(); // デフォルトのフォーム送信をキャンセル
+
+            const workplaceId = document.getElementById('edit-workplace-id').value;
+            const historyId = document.getElementById('edit-history-id').value;
+
+            // フォームから値を取得
+            const dateStr = document.getElementById('edit-date').value;
+            const startTimeStr = document.getElementById('edit-start-time').value;
+            const endTimeStr = document.getElementById('edit-end-time').value;
+
+            // 日付と時刻を結合して、タイムゾーン付きのISO 8601形式の文字列に変換
+            // JST (+09:00) を仮定
+            const startDateTime = new Date(`${dateStr}T${startTimeStr}:00+09:00`);
+            let endDateTime = new Date(`${dateStr}T${endTimeStr}:00+09:00`);
+
+            // 終了時刻が開始時刻より早い場合、翌日として扱う
+            if (endDateTime <= startDateTime) {
+                endDateTime.setDate(endDateTime.getDate() + 1);
+            }
+
+            const payload = {
+                // ShiftUpdatePayload に合わせたデータを作成
+                start_time: startDateTime.toISOString(),
+                end_time: endDateTime.toISOString(),
+                // TODO: summary や description も編集可能にする場合はここに追加
+            };
+
+            try {
+                const response = await fetch(`/api/v1/workplaces/${workplaceId}/shifts/${historyId}`, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        // TODO: 認証トークン
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                if (response.ok) {
+                    alert('シフトを更新しました。');
+                    closeEditModal();
+                    window.location.reload(); // 一覧を再読み込み
+                } else {
+                    const errorData = await response.json();
+                    alert(`更新に失敗しました: ${errorData.detail || '不明なエラー'}`);
+                }
+            } catch (error) {
+                console.error('Error updating shift:', error);
+                alert('更新処理中にエラーが発生しました。');
+            }
+        });
     </script>
 </body>
 </html>
