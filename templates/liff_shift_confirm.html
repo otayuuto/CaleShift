@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>シフト登録の確認</title>
+    <style>
+        body { font-family: sans-serif; margin: 0; padding: 15px; background-color: #f4f4f9; }
+        h1 { text-align: center; color: #333; }
+        p.description { text-align: center; color: #555; margin-bottom: 20px; }
+        .shift-list-container { margin-bottom: 20px; }
+        .shift-item { display: flex; align-items: center; background-color: white; border-radius: 8px; margin-bottom: 10px; padding: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .shift-item input[type="checkbox"] { margin-right: 15px; transform: scale(1.5); }
+        .shift-info { flex-grow: 1; }
+        .shift-date { font-size: 1.1em; font-weight: bold; }
+        .shift-time { font-size: 1em; color: #1a73e8; }
+        .shift-name { font-size: 0.9em; color: #666; }
+        .actions button { margin-left: 5px; padding: 5px 10px; font-size: 14px; border: 1px solid #ccc; background-color: #f9f9f9; border-radius: 4px; cursor: pointer; }
+        .actions .delete-btn { border-color: #d9534f; color: #d9534f; }
+        .confirm-button-container { text-align: center; margin-top: 30px; }
+        .confirm-button-container button { width: 90%; max-width: 400px; padding: 15px; font-size: 18px; font-weight: bold; background-color: #28a745; color: white; border: none; border-radius: 8px; cursor: pointer; }
+        .loading, .error { text-align: center; margin-top: 30px; font-size: 1.1em; color: #888; }
+        .error { color: red; }
+
+        /* ★★★ モーダル用のスタイル ★★★ */
+        .modal-overlay {
+            position: fixed; /* 画面に固定 */
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.6); /* 半透明の黒い背景 */
+            display: none; /* 初期状態は非表示 */
+            justify-content: center; /* 中央寄せ (水平方向) */
+            align-items: center;   /* 中央寄せ (垂直方向) */
+            z-index: 1000; /* 他の要素より手前に表示 */
+        }
+        .modal-content {
+            background-color: white;
+            padding: 20px 25px;
+            border-radius: 8px;
+            width: 90%;
+            max-width: 400px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
+        .modal-content h2 { margin-top: 0; }
+        .modal-form label { display: block; margin-top: 15px; margin-bottom: 5px; font-weight: bold; color: #555; }
+        .modal-form input[type="date"],
+        .modal-form input[type="time"],
+        .modal-form input[type="text"] {
+            width: calc(100% - 22px); /* paddingとborderを考慮 */
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 16px;
+        }
+        .modal-actions { text-align: right; margin-top: 25px; }
+        .modal-actions button {
+            padding: 8px 16px;
+            border-radius: 4px;
+            border: none;
+            cursor: pointer;
+            margin-left: 10px;
+            font-weight: bold;
+        }
+        .modal-actions .save-btn { background-color: #1a73e8; color: white; }
+        .modal-actions .cancel-btn { background-color: #e0e0e0; color: #333; }
+    </style>
+</head>
+<body>
+    <h1>シフト登録の確認</h1>
+    <p class="description">AIが読み取ったシフト情報です。<br>内容を確認し、カレンダーに登録する項目にチェックを入れてください。</p>
+
+    <div id="loading" class="loading">シフト情報を読み込んでいます...</div>
+    <div id="shift-list-container" class="shift-list-container" style="display: none;">
+        <!-- シフト項目がここに動的に追加される -->
+    </div>
+    <div class="confirm-button-container">
+        <button id="register-button" style="display: none;">選択したシフトをカレンダーに登録</button>
+    </div>
+    <p id="error-message" class="error" style="display: none;">情報の読み込み中にエラーが発生しました。</p>
+
+    <div id="edit-modal" class="modal-overlay">
+        <div class="modal-content">
+            <h2>シフト情報を編集</h2>
+            <form id="edit-form" class="modal-form">
+                <!-- 編集対象のインデックスを保持するための非表示フィールド -->
+                <input type="hidden" id="edit-item-index">
+    
+                <label for="edit-date">日付:</label>
+                <input type="date" id="edit-date" required>
+    
+                <label for="edit-start-time">開始時刻:</label>
+                <input type="time" id="edit-start-time" required>
+    
+                <label for="edit-end-time">終了時刻:</label>
+                <input type="time" id="edit-end-time" required>
+                
+                <label for="edit-memo">メモ (オプション):</label>
+                <input type="text" id="edit-memo" placeholder="例: 早番、遅番など">
+    
+                <div class="modal-actions">
+                    <button type="button" class="cancel-btn" onclick="closeEditModal()">キャンセル</button>
+                    <button type="submit" class="save-btn">この内容で保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+    <script>
+        const MY_LIFF_ID = "2007677374-1mkAqZbz";
+
+        // --- グローバル変数 ---
+        let allShiftsData = [];
+        let currentWorkplaceId = null;
+        let currentLineUserId = null;
+
+        document.addEventListener('DOMContentLoaded', function () {
+            initializeAndFetchPendingShifts();
+        });
+
+        async function initializeAndFetchPendingShifts() {
+            try {
+                console.log("Initializing LIFF...");
+                await liff.init({ liffId: MY_LIFF_ID });
+                if (!liff.isLoggedIn()) {
+                    liff.login({ redirectUri: window.location.href });
+                    return;
+                }
+                const profile = await liff.getProfile();
+                currentLineUserId = profile.userId;
+                console.log("LIFF initialized. User ID:", currentLineUserId);
+
+                const urlParams = new URLSearchParams(window.location.search);
+                const pendingId = urlParams.get('pending_id');
+                if (!pendingId) {
+                    throw new Error("Pending ID not found in URL.");
+                }
+                console.log("Pending ID:", pendingId);
+
+                const response = await fetch(`/api/v1/pending-shifts/${pendingId}`);
+                document.getElementById('loading').style.display = 'none';
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`API request failed with status ${response.status}: ${errorText}`);
+                }
+
+                const data = await response.json();
+                console.log("Received pending shifts data:", data);
+
+                if (data.parsed_shifts && data.parsed_shifts.length > 0) {
+                    currentWorkplaceId = data.workplace_id;
+                    allShiftsData = data.parsed_shifts.map(s => ({...s, is_checked: true}));
+                    renderShiftList(); // ★ 引数なしで呼び出し
+                    
+                    document.getElementById('shift-list-container').style.display = 'block';
+                    document.getElementById('register-button').style.display = 'block';
+                } else {
+                    document.getElementById('error-message').textContent = '解析されたシフト情報が見つかりませんでした。';
+                    document.getElementById('error-message').style.display = 'block';
+                }
+
+            } catch (error) {
+                console.error("Failed to initialize LIFF or fetch pending shifts:", error);
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('error-message').style.display = 'block';
+            }
+        }
+
+        // ★★★ renderShiftList 関数を修正 ★★★
+        function renderShiftList() {
+            const container = document.getElementById('shift-list-container');
+            container.innerHTML = ''; // 描画前にクリア
+
+            // グローバル変数 allShiftsData を参照
+            allShiftsData.forEach((shift, index) => {
+                const shiftItem = document.createElement('div');
+                shiftItem.className = 'shift-item';
+                shiftItem.id = `shift-item-${index}`;
+
+                const isChecked = shift.is_checked ? 'checked' : '';
+                const isHoliday = shift.is_holiday;
+                const dateObj = shift.date ? new Date(shift.date + 'T00:00:00') : null;
+                const dateStr = dateObj ? `${dateObj.getMonth() + 1}/${dateObj.getDate()}` : "日付不明";
+                const startTimeStr = shift.start_time || "未定";
+                const endTimeStr = shift.end_time || "未定";
+                const nameStr = shift.name || "氏名不明";
+                const timeDisplay = isHoliday ? "休み" : `${startTimeStr} - ${endTimeStr}`;
+
+                shiftItem.innerHTML = `
+                    <input type="checkbox" id="shift-check-${index}" onchange="toggleShiftSelection(${index})" ${isChecked}>
+                    <div class="shift-info">
+                        <div class="shift-date">${dateStr}</div>
+                        <div class="shift-time">${timeDisplay}</div>
+                        <div class="shift-name">${nameStr}</div>
+                    </div>
+                    <div class="actions">
+                        <button onclick="editShift(${index})">編集</button>
+                        <button class="delete-btn" onclick="deleteShiftItem(${index})">削除</button>
+                    </div>
+                `;
+                container.appendChild(shiftItem);
+            });
+        }
+        
+        // ★★★ deleteShiftItem 関数を修正 ★★★
+        function deleteShiftItem(index) {
+            if (confirm('この項目をリストから削除しますか？\nこの画面から削除されるだけで、確定するまで元に戻せます。')) {
+                // allShiftsData から該当項目を削除
+                allShiftsData.splice(index, 1);
+                // リストを再描画
+                renderShiftList();
+            }
+        }
+
+        function editShift(index) {
+            const shiftToEdit = allShiftsData[index];
+            if (!shiftToEdit) {
+                alert('編集対象のシフトが見つかりませんでした。');
+                return;
+            }
+
+            // フォームに現在の値をセット
+            document.getElementById('edit-item-index').value = index;
+            document.getElementById('edit-date').value = shiftToEdit.date; // YYYY-MM-DD形式
+            document.getElementById('edit-start-time').value = shiftToEdit.start_time; // HH:mm形式
+            document.getElementById('edit-end-time').value = shiftToEdit.end_time;
+            document.getElementById('edit-memo').value = shiftToEdit.memo || ''; // nullなら空文字
+
+            // モーダルを表示
+            document.getElementById('edit-modal').style.display = 'flex';
+        }
+
+        function toggleShiftSelection(index) {
+            if (allShiftsData[index]) {
+                allShiftsData[index].is_checked = !allShiftsData[index].is_checked;
+            }
+        }
+
+        function closeEditModal() {
+            document.getElementById('edit-form').reset(); // フォームをリセット
+            document.getElementById('edit-modal').style.display = 'none';
+        }
+
+        // ★★★ 編集フォームの送信イベントを処理 ★★★
+        document.getElementById('edit-form').addEventListener('submit', function(event) {
+            event.preventDefault(); // デフォルトのフォーム送信をキャンセル
+
+            const index = parseInt(document.getElementById('edit-item-index').value, 10);
+            if (isNaN(index) || !allShiftsData[index]) {
+                alert('編集対象の特定に失敗しました。');
+                return;
+            }
+
+            // フォームから更新された値を取得
+            const updatedDate = document.getElementById('edit-date').value;
+            const updatedStartTime = document.getElementById('edit-start-time').value;
+            const updatedEndTime = document.getElementById('edit-end-time').value;
+            const updatedMemo = document.getElementById('edit-memo').value;
+
+            // グローバル変数 allShiftsData の対応する要素を更新
+            allShiftsData[index].date = updatedDate;
+            allShiftsData[index].start_time = updatedStartTime;
+            allShiftsData[index].end_time = updatedEndTime;
+            allShiftsData[index].memo = updatedMemo || null; // 空文字ならnullに
+
+            console.log(`Updated shift data at index ${index}:`, allShiftsData[index]);
+
+            // モーダルを閉じて、リストを再描画
+            closeEditModal();
+            renderShiftList();
+        });
+
+
+        // ★★★ 「カレンダーに登録」ボタンのイベントリスナー (変更なし) ★★★
+        document.getElementById('register-button').addEventListener('click', async function() {
+            // ... (この中のロジックは前回のものでOK)
+            const shiftsToRegister = allShiftsData.filter(shift => shift.is_checked);
+            if (shiftsToRegister.length === 0) { /* ... */ }
+            if (!confirm(`${shiftsToRegister.length}件のシフトを...`)) { /* ... */ }
+            
+            this.disabled = true;
+            this.textContent = '登録中...';
+            
+            const urlParams = new URLSearchParams(window.location.search);
+            const pendingId = urlParams.get('pending_id');
+
+            const payload = {
+                line_user_id: currentLineUserId,
+                workplace_id: currentWorkplaceId,
+                pending_id: pendingId,
+                shifts_to_register: shiftsToRegister
+            };
+            
+            try {
+                const response = await fetch('/api/v1/shifts/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const result = await response.json();
+                if (response.ok) {
+                    alert(`登録が完了しました。\n成功: ${result.created_count}件, 失敗: ${result.failed_count}件`);
+                    liff.closeWindow();
+                } else {
+                    alert(`登録処理中にエラーが発生しました: ${result.detail || '不明なエラー'}`);
+                    this.disabled = false;
+                    this.textContent = '選択したシフトをカレンダーに登録';
+                }
+            } catch (error) {
+                console.error('Error registering shifts:', error);
+                alert('登録リクエストの送信中にエラーが発生しました。');
+                this.disabled = false;
+                this.textContent = '選択したシフトをカレンダーに登録';
+            }
+        });
+    </script>
+</body>
+</html>
