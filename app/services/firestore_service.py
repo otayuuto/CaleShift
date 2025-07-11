@@ -1,7 +1,7 @@
 # app/services/firestore_service.py
 from google.cloud import firestore
 from typing import Optional, List, Dict, Any
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time, date # time, date をインポート
 import traceback
 import json # 主に google_auth_service の refresh_access_token で使用
 from fastapi.concurrency import run_in_threadpool
@@ -74,6 +74,7 @@ async def get_workplace_shift_rules(db_client: firestore.Client, workplace_id: s
         print(f"ERROR_FS_SERVICE: Failed to get shift rules for workplace {workplace_id}: {e}")
         traceback.print_exc()
         return None # エラー時もNoneを返す
+
 async def get_target_name_for_shift_extraction(
     db_client: firestore.Client,
     line_user_id: str,
@@ -143,9 +144,6 @@ async def get_primary_workplace_id_for_user(db_client: firestore.Client, line_us
         traceback.print_exc()
         return None
 
-# --- 既存の関数 (save_google_credentials_for_user, get_google_credentials_for_user, create_initial_user_document_on_follow) ---
-# これらは前回の修正で run_in_threadpool を使用しており、基本的なロジックは問題なさそうなので、そのまま残します。
-# (以下、既存の関数のコード)
 async def save_google_credentials_for_user(
     db_client: firestore.Client,
     line_user_id: str,
@@ -230,6 +228,7 @@ async def create_initial_user_document_on_follow(
         print(f"ERROR_FIRESTORE_SERVICE: Failed to create initial user document for {line_user_id}: {e}")
         traceback.print_exc()
         return False
+        
 async def log_shift_history(
     db_client: firestore.Client,
     workplace_id: str,
@@ -250,33 +249,34 @@ async def log_shift_history(
         return False
     
     try:
-        # ★★★ 保存パスを /workplaces/{workplace_id}/shift_history に変更 ★★★
         history_collection_ref = db_client.collection('workplaces').document(workplace_id).collection('shift_history')
-        history_doc_ref = history_collection_ref.document() # ドキュメントIDは自動生成
+        history_doc_ref = history_collection_ref.document()
 
-        history_data = {
-            'user_id': line_user_id, # この履歴がどのユーザーのものかを示す
-            # 'workplace_id' フィールドは不要 (親ドキュメントが示しているため)
+        # 日付をまたぐシフトの場合も考慮し、開始/終了日時の両方をタイムスタンプで持つ
+        start_datetime = datetime.combine(shift_info.date, shift_info.start_time).replace(tzinfo=timezone.utc)
+        end_datetime = datetime.combine(shift_info.date, shift_info.end_time).replace(tzinfo=timezone.utc)
+
+        # 終了時刻が開始時刻より早い場合、日付を1日進める
+        if end_datetime <= start_datetime:
+            end_datetime += timedelta(days=1)
             
-            'date': shift_info.date.strftime("%Y-%m-%d"),
-            # 日付をまたぐシフトの場合も考慮し、開始/終了日時の両方をタイムスタンプで持つ
-            'start_time': datetime.combine(shift_info.date, shift_info.start_time).replace(tzinfo=timezone.utc),
-            'end_time': datetime.combine(shift_info.date, shift_info.end_time).replace(tzinfo=timezone.utc),
-
+        history_data = {
+            'user_id': line_user_id,
+            'start_time': start_datetime,
+            'end_time': end_datetime,
             'calendar_event_id': calendar_event_id,
             'status': status,
             'created_at': datetime.now(timezone.utc),
             'updated_at': datetime.now(timezone.utc)
         }
         
-        # 終了時刻が開始時刻より早い場合、日付を1日進める
-        if history_data['end_time'] <= history_data['start_time']:
-            history_data['end_time'] += timedelta(days=1)
-
         # ShiftInfoの他の情報も保存
-        if shift_info.name: history_data['name_in_shift'] = shift_info.name # Firestoreのフィールド名に合わせる
+        if shift_info.name: history_data['name_in_shift'] = shift_info.name
         if shift_info.role: history_data['role'] = shift_info.role
         if shift_info.memo: history_data['memo'] = shift_info.memo
+
+        # log_shift_history では date フィールドは保存していないようなので、コメントアウト
+        # if shift_info.date: history_data['date'] = shift_info.date.strftime("%Y-%m-%d")
 
         await run_in_threadpool(history_doc_ref.set, history_data)
         
@@ -287,6 +287,68 @@ async def log_shift_history(
         print(f"ERROR_FS_SERVICE: Failed to log shift to history for user {line_user_id}, workplace {workplace_id}: {e}")
         traceback.print_exc()
         return False
+
+# ★★★★★ ここからが重複チェックのための修正箇所です ★★★★★
+
+async def check_duplicate_in_shift_history(
+    db_client: firestore.Client,
+    workplace_id: str,
+    line_user_id: str,
+    shift_info: ShiftInfo
+) -> bool:
+    """
+    指定された勤務場所のshift_history内で、同じ日時のシフトが既に存在しないか確認します。
+    """
+    if not all([shift_info.date, shift_info.start_time, shift_info.end_time, workplace_id]):
+        print("WARNING_FS_SERVICE: Insufficient info for duplicate check in history.")
+        return False
+
+    try:
+        # 検索キーとなる開始・終了日時オブジェクトを作成 (UTCで統一)
+        start_datetime = datetime.combine(shift_info.date, shift_info.start_time, tzinfo=timezone.utc)
+        end_datetime = datetime.combine(shift_info.date, shift_info.end_time, tzinfo=timezone.utc)
+
+        # 深夜勤務（日付またぎ）を考慮
+        if end_datetime <= start_datetime:
+            end_datetime += timedelta(days=1)
+
+        history_ref = db_client.collection('workplaces').document(workplace_id).collection('shift_history')
+
+        # Firestoreの複合インデックスが必要になります:
+        # コレクションID: shift_history, クエリスコープ: コレクショングループ
+        # フィールド: user_id (昇順), start_time (昇順), end_time (昇順)
+        query = history_ref.where("user_id", "==", line_user_id) \
+                           .where("start_time", "==", start_datetime) \
+                           .where("end_time", "==", end_datetime) \
+                           .limit(1)
+
+        print("DEBUG_DUPLICATE_CHECK (history): Querying shift_history with:")
+        print(f"  - workplace_id: {workplace_id}")
+        print(f"  - user_id: {line_user_id}")
+        print(f"  - start_time (UTC): {start_datetime.isoformat()}")
+        print(f"  - end_time (UTC):   {end_datetime.isoformat()}")
+
+        # 同期クライアントなので、stream()を直接awaitせず、run_in_threadpoolで実行
+        docs_stream = await run_in_threadpool(query.stream)
+        
+        # 1件でも見つかればTrue
+        for doc in docs_stream:
+            print(f"INFO_FS_SERVICE: Found duplicate data in shift_history. Doc ID: {doc.id}")
+            return True
+
+        print("INFO_FS_SERVICE: No duplicate found in shift_history.")
+        return False
+
+    except Exception as e:
+        print(f"ERROR_FS_SERVICE: Error during duplicate check in shift_history: {e}")
+        traceback.print_exc()
+        # エラー発生時は安全のため、重複とは見なさない（登録処理は進む）
+        return False
+
+# 元のファイルにあった check_duplicate_in_temp_collection は不要なので削除します。
+
+# ★★★★★ ここまでが重複チェックのための修正箇所です ★★★★★
+
 async def get_shift_history_for_user_in_workplace(
     db_client: firestore.Client,
     workplace_id: str,
@@ -312,7 +374,6 @@ async def get_shift_history_for_user_in_workplace(
                 history_data['history_id'] = doc.id # ドキュメントIDも追加
                 history_list.append(history_data)
         
-        print(f"INFO_FS_SERVICE: Retrieved {len(history_list)} history entries for user {line_user_id} from workplace {workplace_id}")
         return history_list
     except Exception as e:
         print(f"ERROR_FS_SERVICE: Failed to get shift history for user {line_user_id}, workplace {workplace_id}: {e}")

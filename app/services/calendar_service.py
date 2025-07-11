@@ -86,11 +86,76 @@ async def get_calendar_service(
         return None
 
 
+async def find_existing_event(
+    db_client: firestore.Client,
+    line_user_id: str,
+    shift_info: ShiftInfo
+) -> Optional[Dict[str, Any]]:
+    """
+    Googleカレンダー内で、指定された時間帯に重複する可能性のある「アルバイト」イベントを検索します。
+    重複するイベントが見つかった場合、そのイベント情報を返します。
+    """
+    service = await get_calendar_service(db_client, line_user_id)
+    if not service:
+        # サービスが取得できない場合は、重複チェックをスキップ（エラーとして扱う）
+        # カレンダー登録に進ませないために、Noneを返すのは適切
+        return None
+
+    start_datetime_aware = datetime.combine(shift_info.date, shift_info.start_time).replace(tzinfo=JST)
+    end_datetime_aware = datetime.combine(shift_info.date, shift_info.end_time).replace(tzinfo=JST)
+    
+    if end_datetime_aware <= start_datetime_aware:
+        end_datetime_aware += timedelta(days=1)
+
+    # 検索範囲を少し広げる（例：開始1分前から終了1分後まで）ことで、
+    # わずかな時間のズレによる重複見逃しを防ぐことも可能
+    time_min_iso = (start_datetime_aware - timedelta(minutes=1)).isoformat()
+    time_max_iso = (end_datetime_aware + timedelta(minutes=1)).isoformat()
+    
+    try:
+        print(f"DEBUG_CAL_SERVICE: Searching for existing events for user {line_user_id} between {time_min_iso} and {time_max_iso}")
+        
+        events_result = await run_in_threadpool(
+            service.events().list(
+                calendarId='primary',  # calendarId のタイポを修正
+                timeMin=time_min_iso,
+                timeMax=time_max_iso,
+                q="アルバイト", 
+                singleEvents=True,
+                maxResults=5
+            ).execute
+        )
+        
+        events = events_result.get('items', [])
+        
+        if events:
+            # 完全に一致するイベントのみを重複とみなすか、時間帯が重なっていれば重複とみなすか
+            # ここでは簡単のため、最初に見つかったイベントを返す
+            print(f"INFO_CAL_SERVICE: Found existing event(s). Returning first match: ID {events[0].get('id')}")
+            return events[0]
+        
+        print("INFO_CAL_SERVICE: No existing events found in the specified range.")
+        return None
+
+    except HttpError as error:
+        print(f"ERROR_CAL_SERVICE: HttpError during event search for {line_user_id}: {error}")
+        # APIエラー時は登録をブロックしない方が安全かもしれないが、ここではNoneを返す
+        return None
+    except Exception as e:
+        print(f"ERROR_CAL_SERVICE: Unexpected error during event search for {line_user_id}: {e}")
+        traceback.print_exc()
+        return None
+
+
 async def create_calendar_event(
     db_client: firestore.Client, # ★ Firestoreクライアントを引数に追加
     line_user_id: str,
     shift_info: ShiftInfo
 ) -> Optional[str]:
+    """
+    Googleカレンダーに新しいイベントを作成します。
+    注意: この関数は重複チェックを行いません。呼び出す前に find_existing_event() で確認してください。
+    """
     if shift_info.is_holiday or not shift_info.start_time or not shift_info.end_time:
         print(f"INFO_CAL_SERVICE: Skipping event creation (holiday/incomplete) for user {line_user_id}, date: {shift_info.date}")
         return None
@@ -125,7 +190,6 @@ async def create_calendar_event(
         'description': event_description,
         'start': { 'dateTime': start_datetime_aware.isoformat() },
         'end': { 'dateTime': end_datetime_aware.isoformat() },
-        # 'timeZone': 'Asia/Tokyo' は aware datetime を使えば通常不要
     }
 
     try:
@@ -138,7 +202,6 @@ async def create_calendar_event(
         print(f"INFO_CAL_SERVICE: Event created for user {line_user_id}: ID: {event_id}, Summary: {event_summary}")
         return event_id
     except HttpError as error:
-        # ... (エラー処理は既存のものをベースに、必要なら詳細化) ...
         print(f"ERROR_CAL_SERVICE: HttpError creating event for {line_user_id}: {error.resp.status} - {error.resp.reason if error.resp else 'Unknown reason'}")
         try:
             error_content = json.loads(error.content.decode())
