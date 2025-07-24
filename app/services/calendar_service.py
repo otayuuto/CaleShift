@@ -14,6 +14,9 @@ from app.services.firestore_service import FirestoreService
 from app.services.google_auth_service import refresh_access_token # トークンリフレッシュ関数
 from app.core.config import settings
 from app.utils.image_parser import ShiftInfo
+from app.models.shift_history import ShiftUpdatePayload
+
+
 
 # JSTタイムゾーンオブジェクトの初期化 (変更なし)
 try:
@@ -151,3 +154,74 @@ async def create_calendar_event(
         print(f"ERROR_CAL_SERVICE: Unexpected error creating event for {line_user_id}: {e}")
         traceback.print_exc()
         return None
+
+async def update_calendar_event(
+    db_service: FirestoreService,
+    line_user_id: str,
+    event_id: str, # 更新対象のGoogleカレンダーイベントID
+    update_payload: ShiftUpdatePayload # 更新内容
+) -> Optional[Dict[str, Any]]:
+    """Googleカレンダーの既存のイベントを更新します。"""
+    service = await get_calendar_service(db_service, line_user_id)
+    if not service: return None
+
+    try:
+        # 1. まず現在のイベントを取得して、更新のベースにする
+        existing_event = await run_in_threadpool(
+            service.events().get(calendarId='primary', eventId=event_id).execute
+        )
+
+        # 2. update_payload に基づいてイベント内容を更新
+        if update_payload.summary:
+            existing_event['summary'] = update_payload.summary
+        if update_payload.description:
+            existing_event['description'] = update_payload.description
+        if update_payload.start_time:
+            existing_event['start']['dateTime'] = update_payload.start_time.isoformat()
+        if update_payload.end_time:
+            existing_event['end']['dateTime'] = update_payload.end_time.isoformat()
+        
+        # 3. 更新APIを呼び出す
+        updated_event = await run_in_threadpool(
+            service.events().update(calendarId='primary', eventId=event_id, body=existing_event).execute
+        )
+        print(f"INFO_CAL_SERVICE: Event updated for user {line_user_id}: ID: {updated_event.get('id')}")
+        return updated_event
+    except HttpError as e:
+        if e.resp.status == 404:
+            print(f"WARNING_CAL_SERVICE: Event with ID {event_id} not found for update.")
+        else:
+            print(f"ERROR_CAL_SERVICE: HttpError updating event {event_id}: {e}")
+        return None
+    except Exception as e:
+        print(f"ERROR_CAL_SERVICE: Unexpected error updating event {event_id}: {e}")
+        traceback.print_exc()
+        return None
+
+
+async def delete_calendar_event(
+    db_service: FirestoreService,
+    line_user_id: str,
+    event_id: str # 削除対象のGoogleカレンダーイベントID
+) -> bool:
+    """Googleカレンダーからイベントを削除します。"""
+    service = await get_calendar_service(db_service, line_user_id)
+    if not service: return False
+
+    try:
+        # 削除APIを呼び出す (レスポンスボディはない)
+        await run_in_threadpool(
+            service.events().delete(calendarId='primary', eventId=event_id).execute
+        )
+        print(f"INFO_CAL_SERVICE: Event deleted successfully for user {line_user_id}: ID: {event_id}")
+        return True
+    except HttpError as e:
+        if e.resp.status == 410 or e.resp.status == 404: # Gone or Not Found
+            print(f"INFO_CAL_SERVICE: Event with ID {event_id} already deleted or not found.")
+            return True # 既にないので、結果としては成功とみなす
+        print(f"ERROR_CAL_SERVICE: HttpError deleting event {event_id}: {e}")
+        return False
+    except Exception as e:
+        print(f"ERROR_CAL_SERVICE: Unexpected error deleting event {event_id}: {e}")
+        traceback.print_exc()
+        return False

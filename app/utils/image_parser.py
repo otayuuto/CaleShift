@@ -3,7 +3,7 @@ import re
 from datetime import datetime, time, date
 from typing import List, Optional, Dict, Any
 
-from pydantic import BaseModel, field_validator # Pydantic関連のインポートはそのまま
+from pydantic import BaseModel, field_validator, ValidationError # Pydantic関連のインポートはそのまま
 
 # ★★★ OpenAIサービスをインポート ★★★
 from app.services import openai_service 
@@ -29,39 +29,57 @@ class ShiftInfo(BaseModel):
     @field_validator('date', mode='before')
     @classmethod
     def parse_date_str(cls, value):
-        print(f"DEBUG_VALIDATOR (date): Received value: '{value}' (type: {type(value)})") # ★ログ追加
+        print(f"DEBUG_VALIDATOR (date): Received value: '{value}' (type: {type(value)})")
         if isinstance(value, str):
+            # 形式1: YYYY-MM-DD
             try:
-                parsed = datetime.strptime(value, "%Y-%m-%d").date()
-                print(f"DEBUG_VALIDATOR (date): Parsed to: {parsed}") # ★ログ追加
-                return parsed
-            except ValueError as e:
-                print(f"ERROR_VALIDATOR (date): Failed to parse date string '{value}': {e}")
-                raise ValueError(f"Invalid date format: {value}")
-        # ... (他の型の処理は変更なし) ...
-        elif isinstance(value, datetime): return value.date()
-        elif isinstance(value, date): return value
-        print(f"WARNING_VALIDATOR (date): Unexpected type for date: {type(value)}, value: {value}")
-        return value
+                return datetime.strptime(value, "%Y-%m-%d").date()
+            except ValueError:
+                # 形式2: ISO 8601形式のdatetime文字列 (例: '2025-06-20T17:00:00.000Z')
+                try:
+                    # fromisoformatはタイムゾーンも扱う
+                    return datetime.fromisoformat(value.replace('Z', '+00:00')).date()
+                except ValueError:
+                    raise ValueError(f"Invalid date format: {value}")
+        elif isinstance(value, datetime):
+            return value.date()
+        elif isinstance(value, date):
+            return value
+        raise TypeError(f"Unsupported type for date: {type(value)}")
 
     @field_validator('start_time', 'end_time', mode='before')
     @classmethod
-    def parse_time_str(cls, value, info: any = None): # info引数を追加 (Pydantic v2ではfield_validatorの第二引数はValidationInfo)
+    def parse_time_str(cls, value, info: any = None):
         field_name = info.field_name if info else "unknown_field"
-        print(f"DEBUG_VALIDATOR ({field_name}): Received value: '{value}' (type: {type(value)})") # ★ログ追加
-        if value is None or isinstance(value, time): return value
+        print(f"DEBUG_VALIDATOR ({field_name}): Received value: '{value}' (type: {type(value)})")
+        if value is None or isinstance(value, time):
+            return value
         if isinstance(value, str):
             value_stripped = value.strip()
-            if not value_stripped or value_stripped.lower() == "休み": return None
-            try:
-                parsed = datetime.strptime(value_stripped, "%H:%M").time()
-                print(f"DEBUG_VALIDATOR ({field_name}): Parsed to: {parsed}") # ★ログ追加
-                return parsed
-            except ValueError as e:
-                print(f"ERROR_VALIDATOR ({field_name}): Failed to parse time string '{value_stripped}': {e}")
-                raise ValueError(f"Invalid time format: {value_stripped}")
-        print(f"WARNING_VALIDATOR ({field_name}): Unexpected type for time: {type(value)}, value: {value}")
-        return value
+            if not value_stripped: return None
+            
+            # 試行するフォーマットのリスト
+            time_formats = [
+                "%H:%M:%S",  # "22:00:00" 形式
+                "%H:%M",      # "22:00" 形式
+            ]
+            
+            for fmt in time_formats:
+                try:
+                    parsed_time = datetime.strptime(value_stripped, fmt).time()
+                    print(f"DEBUG_VALIDATOR ({field_name}): Parsed '{value_stripped}' with format '{fmt}' to {parsed_time}")
+                    return parsed_time
+                except ValueError:
+                    continue # 次のフォーマットを試す
+            
+            # どのフォーマットにも一致しなかった場合
+            print(f"ERROR_VALIDATOR ({field_name}): Failed to parse time string '{value_stripped}' with any known format.")
+            raise ValueError(f"Invalid time format: {value_stripped}")
+        
+        elif isinstance(value, datetime): # ★ datetimeオブジェクトが直接渡された場合
+             return value.time()
+
+        raise TypeError(f"Unsupported type for time: {type(value)}")
 
 # ★★★ メインのパース関数をOpenAIを使うように変更 ★★★
 async def parse_shift_text_to_structured_data(

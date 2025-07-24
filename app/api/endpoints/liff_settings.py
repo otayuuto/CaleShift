@@ -10,6 +10,7 @@ from app.models.setting import (
 )
 from app.services.firestore_service import FirestoreService
 from app.api.dependencies import get_db_service # ★ 依存関係関数をインポート
+from urllib.parse import urlparse, parse_qs # ★ URLパース用のライブラリをインポート
 
 router = APIRouter()
 
@@ -23,6 +24,69 @@ async def get_liff_workplace_settings_page(request: Request):
     if templates is None:
         raise HTTPException(status_code=500, detail="Template engine not found.")
     return templates.TemplateResponse("settings.html", {"request": request})
+
+@router.get("/liff/google-calendar-auth", response_class=HTMLResponse, tags=["LIFF Pages"])
+async def liff_google_calendar_auth_page(request: Request):
+    """(Googleカレンダー連携用) LIFFページ (liff_google_calendar_auth.html) を表示します。"""
+    templates = request.app.state.templates
+    if templates is None:
+        raise HTTPException(status_code=500, detail="Server configuration error: Template engine not found.")
+    return templates.TemplateResponse("liff_google_calendar_auth.html", {"request": request})
+
+@router.get("/liff/shifts/list", response_class=HTMLResponse, tags=["LIFF Pages"])
+async def liff_shift_list_page(request: Request):
+    """(シフト履歴一覧用) LIFFページ (liff_shift_list.html) を表示します。"""
+    templates = request.app.state.templates
+    if templates is None:
+        raise HTTPException(status_code=500, detail="Server configuration error: Template engine not found.")
+    return templates.TemplateResponse("liff_shift_list.html", {"request": request})
+
+# シフト登録確認・編集用LIFFページ
+@router.get("/liff/shifts/confirm", response_class=HTMLResponse, tags=["LIFF Pages"])
+async def liff_shift_confirm_page(
+    request: Request,
+    pending_id: Optional[str] = None, # ★ pending_id をオプショナルにする
+    liff_state: Optional[str] = None # ★ liff.state を受け取る (クエリパラメータ名は 'liff.state' ではなく 'liff_state')
+                                    # FastAPIはドットを含むクエリパラメータ名を扱いにくい場合があるため、
+                                    # request.query_params を直接見る方が確実
+):
+    """シフト登録確認・編集用LIFFページ (liff_shift_confirm.html) を表示します。"""
+    templates = request.app.state.templates
+    if templates is None:
+        raise HTTPException(status_code=500, detail="Server configuration error: Template engine not found.")
+
+    final_pending_id = pending_id # まずは直接の pending_id を試す
+
+    # もし pending_id が直接取得できなければ、liff.state をパースしてみる
+    if not final_pending_id:
+        # FastAPIではクエリパラメータのドットがアンダースコアに変換されることがあるが、
+        # request.query_params を直接見るのが最も確実
+        liff_state_from_query = request.query_params.get("liff.state")
+        if liff_state_from_query:
+            print(f"DEBUG: Found liff.state: {liff_state_from_query}")
+            # liff.state の値はURLエンコードされている (例: %3Fpending_id%3Dxxxx)
+            # さらに、その中身もクエリ文字列になっている (例: ?pending_id=xxxx)
+            # URLデコードはFastAPIが自動で行うので、中身のクエリをパースする
+            
+            # liff.state の先頭が '?' で始まっている場合がある
+            query_in_liff_state = liff_state_from_query
+            if query_in_liff_state.startswith("?"):
+                query_in_liff_state = query_in_liff_state[1:]
+                
+            parsed_params = parse_qs(query_in_liff_state)
+            if 'pending_id' in parsed_params:
+                final_pending_id = parsed_params['pending_id'][0] # parse_qs は値のリストを返す
+                print(f"DEBUG: Extracted pending_id from liff.state: {final_pending_id}")
+
+    if not final_pending_id:
+        # それでも見つからない場合はエラー
+        print("ERROR: Could not find 'pending_id' directly or within 'liff.state'.")
+        raise HTTPException(status_code=400, detail="Required parameter 'pending_id' is missing.")
+
+    return templates.TemplateResponse("liff_shift_confirm.html", {
+        "request": request,
+        "pending_id": final_pending_id # 抽出したIDをテンプレートに渡す
+    })
 
 # ==============================================================================
 # APIエンドポイント群

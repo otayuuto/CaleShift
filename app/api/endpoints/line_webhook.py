@@ -1,6 +1,6 @@
 # app/api/endpoints/line_webhook.py
 from fastapi import APIRouter, Depends, Request, HTTPException, BackgroundTasks
-from linebot.v3.webhook import WebhookHandler # WebhookHandler を直接使う
+from linebot.v3.webhook import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
     ApiClient, Configuration, MessagingApi, MessagingApiBlob,
@@ -10,17 +10,14 @@ from linebot.v3.webhooks import (
     MessageEvent, TextMessageContent as WebhookTextMessageContent,
     ImageMessageContent as WebhookImageMessageContent, FollowEvent,
 )
-from google.cloud.firestore import Client as FirestoreClient
-from typing import Optional, List, Dict, Any # Dict, Any を追加
+from typing import Optional, List
 import traceback
-import json # OpenAIのレスポンスを扱うため
-
-from app.core.config import settings
-from app.services import vision_service, calendar_service, firestore_service, openai_service
-from app.utils.image_parser import ShiftInfo # Pydanticモデルとして使用
-from fastapi.concurrency import run_in_threadpool # Firestore呼び出し用
 from datetime import date
 
+from app.core.config import settings
+# calendar_service と vision_service はこのファイルでは直接不要になる
+from app.services import calendar_service, firestore_service, openai_service
+from app.utils.image_parser import ShiftInfo
 from app.api.dependencies import get_db_service
 from app.services.firestore_service import FirestoreService
 
@@ -42,14 +39,8 @@ async def process_image_and_calendar_registration(
     user_id: str,
     message_id: str
 ):
-    final_reply_text = "画像の解析とカレンダー登録処理が完了しました。"
-    created_event_ids: List[str] = []
-    failed_to_create_count = 0
-    parse_results_for_reply: List[str] = []
-    parsed_shift_data_list: List[ShiftInfo] = []
-
     try:
-
+        # --- 1. 画像取得 ---
         print(f"BACKGROUND_TASK_INFO: [{user_id}] Started image processing for message_id: {message_id}")
         message_content_response = line_bot_blob_api.get_message_content(message_id=message_id)
         image_bytes = b''
@@ -58,28 +49,22 @@ async def process_image_and_calendar_registration(
         else: image_bytes = message_content_response
 
         if not image_bytes:
-            final_reply_text = "LINEからの画像の取得に失敗しました。"
-            line_bot_api.push_message(PushMessageRequest(to=user_id, messages=[MessagingTextMessage(text=final_reply_text)]))
-            return
-        print(f"BACKGROUND_TASK_INFO: [{user_id}] Retrieved {len(image_bytes)} bytes of image data. OCR in progress...")
+            raise Exception("LINEからの画像の取得に失敗しました。")
+        print(f"BACKGROUND_TASK_INFO: [{user_id}] Retrieved {len(image_bytes)} bytes of image data.")
 
-# --- 2. ユーザーの勤務場所ID、ルール、対象氏名を取得 (ロジックをここに統合) ---
+        # --- 2. ユーザーの勤務場所ID、ルール、対象氏名を取得 ---
         workplace_id = await db_service.get_primary_workplace_id_for_user(user_id)
         if not workplace_id:
-            print(f"BACKGROUND_TASK_ERROR: [{user_id}] No primary workplace found. Cannot proceed.")
-            final_reply_text = "シフトを登録する勤務場所が設定されていません。LIFFアプリから設定してください。"
-            line_bot_api.push_message(PushMessageRequest(to=user_id, messages=[MessagingTextMessage(text=final_reply_text)]))
-            return
+            raise Exception("シフトを登録する勤務場所が設定されていません。LIFFアプリから設定してください。")
 
-        print(f"INFO_WEBHOOK: [{user_id}] Using workplace_id '{workplace_id}' for rules, target name, and history.")
+        print(f"INFO_WEBHOOK: [{user_id}] Using workplace_id '{workplace_id}' for rules and target name.")
         user_shift_rules = await db_service.get_workplace_shift_rules(workplace_id)
         target_name_to_extract = await db_service.get_target_name_for_shift_extraction(user_id, workplace_id)
-
-        if not user_shift_rules: # ルールが取得できなかった場合のフォールバック
-            print(f"WARNING_WEBHOOK: [{user_id}] No specific shift rules found. Using generic prompt.")
+        
+        if not user_shift_rules:
             user_shift_rules = "提供された画像から、日付、氏名、開始時間、終了時間を抽出し、JSON形式で返してください。"
-
-        # --- 3. OpenAI APIを呼び出してシフト情報を解析 (画像入力バージョン) ---
+        
+        # --- 3. OpenAI APIでシフト情報を解析 ---
         today_date = date.today()
         print(f"BACKGROUND_TASK_INFO: [{user_id}] Requesting OpenAI with image. Target: '{target_name_to_extract or 'All'}'.")
         openai_response_dict = await openai_service.analyze_shift_image_with_rules(
@@ -87,104 +72,54 @@ async def process_image_and_calendar_registration(
             specific_rules_text=user_shift_rules,
             current_date_for_context=today_date,
             target_name=target_name_to_extract,
-            image_description="これは従業員の週間または月間勤務シフト表の画像です。表形式になっている可能性が高いです。"
+            image_description="これは従業員の週間または月間勤務シフト表の画像です。"
         )
 
-        # --- 4. レスポンスの解析、カレンダー登録、履歴保存 (変更なし) ---
-        if openai_response_dict and openai_response_dict.get("shifts") is not None and isinstance(openai_response_dict.get("shifts"), list):
-            raw_shifts_from_openai = openai_response_dict["shifts"]
-            if not raw_shifts_from_openai:
-                final_reply_text = f"AIが画像から「{target_name_to_extract or 'あなた'}」のシフト情報を見つけられませんでした。"
-            else:
-                for raw_shift in raw_shifts_from_openai:
-                    try:
-                        shift_obj = ShiftInfo(**raw_shift)
-                        # target_nameのフィルタリング
-                        if target_name_to_extract and shift_obj.name and target_name_to_extract.lower() not in shift_obj.name.lower():
-                            continue
-                        parsed_shift_data_list.append(shift_obj)
-                    except Exception as e_pydantic:
-                        print(f"CRITICAL_WEBHOOK_ERROR: [{user_id}] Failed to convert OpenAI entry to ShiftInfo: {raw_shift}. Error: {e_pydantic}")
-                        traceback.print_exc()
-                        parse_results_for_reply.append(f"- 解析エラー: {str(raw_shift)[:50]}...")
-        else:
-            final_reply_text = "AIによるシフト情報の解析に失敗しました (OpenAIからの応答が不正または期待する形式ではありません)。"
-            print(f"ERROR_WEBHOOK: [{user_id}] OpenAI response was None or not in expected format. Response: {openai_response_dict}")
+        if not openai_response_dict or not openai_response_dict.get("shifts"):
+            raise Exception("AIが画像からシフト情報を解析できませんでした。")
 
-        print(f"DEBUG_WEBHOOK: [{user_id}] Final parsed_shift_data_list: {parsed_shift_data_list}")
-
-        if parsed_shift_data_list:
-            print(f"DEBUG_WEBHOOK: [{user_id}] parsed_shift_data_list is NOT empty. Proceeding to calendar registration.")
-            processed_shifts_count = 0
-            for shift_info in parsed_shift_data_list:
-                date_str = shift_info.date.strftime("%m/%d") if shift_info.date else "日付不明"
-                name_s = f"{shift_info.name} " if shift_info.name else ""
-                role_s = f"({shift_info.role})" if shift_info.role else ""
-                
-                if shift_info.is_holiday:
-                    parse_results_for_reply.append(f"- {date_str}: {name_s}休み")
+        # --- 4. 解析結果をPydanticモデルに変換 (検証目的) ---
+        parsed_shift_data_list: List[ShiftInfo] = []
+        for raw_shift in openai_response_dict["shifts"]:
+            try:
+                # ターゲット名でのフィルタリング
+                if target_name_to_extract and raw_shift.get("name") and target_name_to_extract.lower() not in raw_shift.get("name").lower():
                     continue
-                if not shift_info.start_time or not shift_info.end_time or not shift_info.date:
-                    start_t = shift_info.start_time.strftime("%H:%M") if shift_info.start_time else "未定"
-                    end_t = shift_info.end_time.strftime("%H:%M") if shift_info.end_time else "未定"
-                    parse_results_for_reply.append(f"- {date_str}: {name_s}{start_t}～{end_t} {role_s} (情報不備)".strip())
-                    failed_to_create_count += 1
-                    continue
-                
-                processed_shifts_count += 1
-                start_t = shift_info.start_time.strftime("%H:%M")
-                end_t = shift_info.end_time.strftime("%H:%M")
-                memo_s = f" [{shift_info.memo}]" if shift_info.memo else ""
-                
-                event_id = await calendar_service.create_calendar_event(db_service, user_id, shift_info)
-                if event_id:
-                    created_event_ids.append(event_id)
-                    parse_results_for_reply.append(f"- {date_str}: {name_s}{start_t}～{end_t} {role_s}{memo_s} -> 登録成功".strip())
+                parsed_shift_data_list.append(ShiftInfo(**raw_shift))
+            except Exception as e:
+                print(f"WARNING: Skipping a shift entry due to pydantic validation error: {e}")
+        
+        if not parsed_shift_data_list:
+            raise Exception(f"AIが画像から「{target_name_to_extract or 'あなた'}」のシフト情報を見つけられませんでした。")
 
-                    print(f"BACKGROUND_TASK_INFO: [{user_id}] Logging successful shift to history for workplace {workplace_id}. Event ID: {event_id}")
-                    await db_service.log_shift_history( # db_service経由で呼び出す
-                        workplace_id=workplace_id,
-                        line_user_id=user_id,
-                        shift_info=shift_info,
-                        calendar_event_id=event_id, # ★★★ ここで定義済みの event_id を渡す ★★★
-                        status="created"
-                    )
+        # --- 5. 解析結果を一時保存し、確認用LIFF URLを送信 ---
+        # PydanticオブジェクトをJSONシリアライズ可能な辞書のリストに変換して保存
+        shifts_to_save = [shift.model_dump(mode='json') for shift in parsed_shift_data_list]
 
-                else:
-                    failed_to_create_count += 1
-                    parse_results_for_reply.append(f"- {date_str}: {name_s}{start_t}～{end_t} {role_s}{memo_s} -> 登録失敗".strip())
-            
-            if not parsed_shift_data_list: # ShiftInfoに変換できるものがなかった場合
-                if not final_reply_text or final_reply_text == "画像の解析とカレンダー登録処理が完了しました。":
-                    final_reply_text = "AIがシフト情報を解析しましたが、カレンダーに登録できる形式ではありませんでした。"
-            elif processed_shifts_count == 0 : # 有効なシフトがなかった
-                final_reply_text = "解析された情報:\n" + "\n".join(parse_results_for_reply)
-                final_reply_text += "\n\nカレンダーに登録可能な有効なシフトが見つかりませんでした。"
-            elif created_event_ids:
-                final_reply_text = f"{len(created_event_ids)}件のシフトをカレンダーに登録しました。"
-                if failed_to_create_count > 0:
-                    final_reply_text += f"\n{failed_to_create_count}件は登録/処理できませんでした。"
-                final_reply_text += "\n\n処理結果:\n" + "\n".join(parse_results_for_reply)
-            elif failed_to_create_count > 0: # 全て失敗
-                final_reply_text = f"{failed_to_create_count}件全てのシフトの登録/処理に失敗しました。"
-                final_reply_text += "\n\n処理結果:\n" + "\n".join(parse_results_for_reply)
-            # (elseブロックは不要)
-        elif not final_reply_text or final_reply_text == "画像の解析とカレンダー登録処理が完了しました。":
-            print(f"DEBUG_WEBHOOK: [{user_id}] parsed_shift_data_list IS empty AND final_reply_text is not set to a specific error. Setting generic parse error.")
-            final_reply_text = "AIが画像からシフト情報を解析できませんでした。" # または類似のメッセージ
-        else:
-            print(f"DEBUG_WEBHOOK: [{user_id}] parsed_shift_data_list IS empty BUT final_reply_text was already set to: {final_reply_text}")
+        pending_id = await db_service.save_pending_shifts(user_id, workplace_id, shifts_to_save)
+        if not pending_id:
+            raise Exception("解析結果の一時保存に失敗しました。")
 
-        if len(final_reply_text) > 4800:
-            final_reply_text = final_reply_text[:4800] + "\n...(長すぎるため省略)"
+        # 確認用LIFF URLを組み立てる (LIFFのエンドポイントURLは .env で管理するのが望ましい)
+        confirm_liff_endpoint = "/liff/shifts/confirm" # フェーズ2で作成するLIFFページのパス
+        confirm_url = f"{settings.NGROK_URL}{confirm_liff_endpoint}?pending_id={pending_id}"
+        
+        final_reply_text = (
+            f"AIが {len(parsed_shift_data_list)} 件のシフト情報を読み取りました。\n\n"
+            "カレンダーに登録する前に、内容が正しいか以下のURLから確認・編集してください。\n"
+            f"{confirm_url}"
+        )
+
+        # ユーザーにPush Messageで通知
         line_bot_api.push_message(PushMessageRequest(to=user_id, messages=[MessagingTextMessage(text=final_reply_text)]))
-        print(f"BACKGROUND_TASK_INFO: [{user_id}] Pushed final result to user.")
+        print(f"BACKGROUND_TASK_INFO: [{user_id}] Sent confirmation URL to user.")
 
     except Exception as e:
-        print(f"BACKGROUND_TASK_ERROR: [{user_id}] Unhandled error in process_image_and_calendar_registration: {e}")
+        # --- 6. エラーハンドリング ---
+        print(f"BACKGROUND_TASK_ERROR: [{user_id}] Error in process_image_and_calendar_registration: {e}")
         traceback.print_exc()
         try:
-            error_message_to_user = "画像の処理中に予期せぬエラーが発生しました。運営にご連絡ください。"
+            error_message_to_user = f"画像の処理中にエラーが発生しました。\n理由: {str(e)[:100]}"
             line_bot_api.push_message(PushMessageRequest(to=user_id, messages=[MessagingTextMessage(text=error_message_to_user)]))
         except Exception as e2:
             print(f"BACKGROUND_TASK_ERROR: [{user_id}] Failed to send final error push message: {e2}")

@@ -8,6 +8,9 @@ from starlette.middleware.sessions import SessionMiddleware
 from pathlib import Path
 import traceback
 
+from app.api.endpoints import shift_management
+
+# 設定ファイルをインポート
 from app.core.config import settings
 from app.api.routers import api_router
 from app.api.endpoints import liff_settings
@@ -93,8 +96,9 @@ else:
 
 # ★★★ APIルーターのインクルード ★★★
 app.include_router(api_router, prefix=settings.API_V1_STR)
-app.include_router(liff_settings.router) # liff_settings.py 内で /api/v1 などのパスを定義
-
+app.include_router(liff_settings.router, tags=["LIFF"])
+#app.include_router(liff_settings.router)
+app.include_router(shift_management.router)
 
 # ★★★ ルートエンドポイント (起動エラーチェック機能付き) ★★★
 @app.get("/", response_class=Response, include_in_schema=False)
