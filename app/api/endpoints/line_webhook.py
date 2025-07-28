@@ -1,180 +1,96 @@
-# app/api/endpoints/line_webhook.py
+# app/api/endpoints/line_webhook.py (統合・修正後)
 from fastapi import APIRouter, Depends, Request, HTTPException, BackgroundTasks
 from linebot.v3.webhook import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.messaging import (
-    ApiClient, Configuration, MessagingApi, MessagingApiBlob,
-    ReplyMessageRequest, PushMessageRequest, TextMessage as MessagingTextMessage,
-)
-from linebot.v3.webhooks import (
-    MessageEvent, TextMessageContent as WebhookTextMessageContent,
-    ImageMessageContent as WebhookImageMessageContent, FollowEvent,
-)
+from linebot.v3.messaging import ApiClient, Configuration, MessagingApi, MessagingApiBlob, ReplyMessageRequest, PushMessageRequest, TextMessage as MessagingTextMessage
+from linebot.v3.webhooks import MessageEvent, TextMessageContent as WebhookTextMessageContent, ImageMessageContent as WebhookImageMessageContent, FollowEvent
 from typing import Optional, List
 import traceback
 from datetime import date
 
 from app.core.config import settings
-# calendar_service と vision_service はこのファイルでは直接不要になる
-from app.services import calendar_service, firestore_service, openai_service
+from app.services import calendar_service, openai_service
 from app.utils.image_parser import ShiftInfo
 from app.api.dependencies import get_db_service
 from app.services.firestore_service import FirestoreService
 
-
 router = APIRouter()
 
-# WebhookHandlerのインスタンスを作成 (署名検証とイベントパースに使用)
 line_webhook_handler = WebhookHandler(settings.LINE_CHANNEL_SECRET)
-
-# LINE SDKクライアントの初期化
 configuration = Configuration(access_token=settings.LINE_CHANNEL_ACCESS_TOKEN)
 line_bot_api = MessagingApi(api_client=ApiClient(configuration))
 line_bot_blob_api = MessagingApiBlob(api_client=ApiClient(configuration))
 
-print("INFO_LINE_WEBHOOK: LINE Messaging API clients initialized successfully.")
-
-async def process_image_and_calendar_registration(
-    db_service: FirestoreService,
-    user_id: str,
-    message_id: str
-):
+# --- バックグラウンドタスク (画像解析 -> 一時保存 -> 確認URL送信) ---
+async def process_image_and_send_confirm_url(db_service: FirestoreService, user_id: str, message_id: str):
     try:
-        # --- 1. 画像取得 ---
-        print(f"BACKGROUND_TASK_INFO: [{user_id}] Started image processing for message_id: {message_id}")
-        message_content_response = line_bot_blob_api.get_message_content(message_id=message_id)
         image_bytes = b''
+        message_content_response = line_bot_blob_api.get_message_content(message_id=message_id)
         if hasattr(message_content_response, 'iter_content'):
             for chunk in message_content_response.iter_content(): image_bytes += chunk
         else: image_bytes = message_content_response
+        if not image_bytes: raise Exception("LINEからの画像の取得に失敗しました。")
 
-        if not image_bytes:
-            raise Exception("LINEからの画像の取得に失敗しました。")
-        print(f"BACKGROUND_TASK_INFO: [{user_id}] Retrieved {len(image_bytes)} bytes of image data.")
-
-        # --- 2. ユーザーの勤務場所ID、ルール、対象氏名を取得 ---
         workplace_id = await db_service.get_primary_workplace_id_for_user(user_id)
-        if not workplace_id:
-            raise Exception("シフトを登録する勤務場所が設定されていません。LIFFアプリから設定してください。")
+        if not workplace_id: raise Exception("シフトを登録する勤務場所が設定されていません。LIFFアプリから設定してください。")
 
-        print(f"INFO_WEBHOOK: [{user_id}] Using workplace_id '{workplace_id}' for rules and target name.")
         user_shift_rules = await db_service.get_workplace_shift_rules(workplace_id)
         target_name_to_extract = await db_service.get_target_name_for_shift_extraction(user_id, workplace_id)
         
-        if not user_shift_rules:
-            user_shift_rules = "提供された画像から、日付、氏名、開始時間、終了時間を抽出し、JSON形式で返してください。"
-        
-        # --- 3. OpenAI APIでシフト情報を解析 ---
-        today_date = date.today()
-        print(f"BACKGROUND_TASK_INFO: [{user_id}] Requesting OpenAI with image. Target: '{target_name_to_extract or 'All'}'.")
         openai_response_dict = await openai_service.analyze_shift_image_with_rules(
-            image_bytes=image_bytes,
-            specific_rules_text=user_shift_rules,
-            current_date_for_context=today_date,
-            target_name=target_name_to_extract,
-            image_description="これは従業員の週間または月間勤務シフト表の画像です。"
+            image_bytes=image_bytes, specific_rules_text=user_shift_rules or "",
+            current_date_for_context=date.today(), target_name=target_name_to_extract
         )
-
         if not openai_response_dict or not openai_response_dict.get("shifts"):
             raise Exception("AIが画像からシフト情報を解析できませんでした。")
 
-        # --- 4. 解析結果をPydanticモデルに変換 (検証目的) ---
-        parsed_shift_data_list: List[ShiftInfo] = []
+        parsed_shift_data_list = []
         for raw_shift in openai_response_dict["shifts"]:
             try:
-                # ターゲット名でのフィルタリング
-                if target_name_to_extract and raw_shift.get("name") and target_name_to_extract.lower() not in raw_shift.get("name").lower():
-                    continue
                 parsed_shift_data_list.append(ShiftInfo(**raw_shift))
-            except Exception as e:
-                print(f"WARNING: Skipping a shift entry due to pydantic validation error: {e}")
-        
+            except Exception as e: print(f"WARNING: Skipping a shift entry due to pydantic validation error: {e}")
         if not parsed_shift_data_list:
             raise Exception(f"AIが画像から「{target_name_to_extract or 'あなた'}」のシフト情報を見つけられませんでした。")
 
-        # --- 5. 解析結果を一時保存し、確認用LIFF URLを送信 ---
-        # PydanticオブジェクトをJSONシリアライズ可能な辞書のリストに変換して保存
         shifts_to_save = [shift.model_dump(mode='json') for shift in parsed_shift_data_list]
-
         pending_id = await db_service.save_pending_shifts(user_id, workplace_id, shifts_to_save)
-        if not pending_id:
-            raise Exception("解析結果の一時保存に失敗しました。")
+        if not pending_id: raise Exception("解析結果の一時保存に失敗しました。")
 
-        # 確認用LIFF URLを組み立てる (LIFFのエンドポイントURLは .env で管理するのが望ましい)
-        confirm_liff_endpoint = "/liff/shifts/confirm" # フェーズ2で作成するLIFFページのパス
-        confirm_url = f"{settings.SERVICE_URL}{confirm_liff_endpoint}?pending_id={pending_id}"
-        
+        confirm_url = f"{settings.SERVICE_URL}/liff/shifts/confirm?pending_id={pending_id}"
         final_reply_text = (
             f"AIが {len(parsed_shift_data_list)} 件のシフト情報を読み取りました。\n\n"
             "カレンダーに登録する前に、内容が正しいか以下のURLから確認・編集してください。\n"
             f"{confirm_url}"
         )
-
-        # ユーザーにPush Messageで通知
         line_bot_api.push_message(PushMessageRequest(to=user_id, messages=[MessagingTextMessage(text=final_reply_text)]))
-        print(f"BACKGROUND_TASK_INFO: [{user_id}] Sent confirmation URL to user.")
-
     except Exception as e:
-        # --- 6. エラーハンドリング ---
-        print(f"BACKGROUND_TASK_ERROR: [{user_id}] Error in process_image_and_calendar_registration: {e}")
         traceback.print_exc()
         try:
-            error_message_to_user = f"画像の処理中にエラーが発生しました。\n理由: {str(e)[:100]}"
-            line_bot_api.push_message(PushMessageRequest(to=user_id, messages=[MessagingTextMessage(text=error_message_to_user)]))
-        except Exception as e2:
-            print(f"BACKGROUND_TASK_ERROR: [{user_id}] Failed to send final error push message: {e2}")
+            error_message = f"画像の処理中にエラーが発生しました。\n理由: {str(e)[:100]}"
+            line_bot_api.push_message(PushMessageRequest(to=user_id, messages=[MessagingTextMessage(text=error_message)]))
+        except Exception as e2: print(f"Failed to send final error push message: {e2}")
 
-
+# --- Webhookエンドポイント ---
 @router.post("/callback", summary="LINE Bot Webhook callback")
-async def line_webhook_callback(
-    request: Request,
-    background_tasks: BackgroundTasks,
-    db_service: FirestoreService = Depends(get_db_service)
-):
-    signature = request.headers.get("X-Line-Signature")
-    if not signature: raise HTTPException(status_code=400, detail="X-Line-Signature header not found")
-    body_bytes = await request.body()
-    body = body_bytes.decode('utf-8')
-    print(f"INFO_WEBHOOK: Received webhook body (first 500 chars): {body[:500]}...")
-    # db_service = request.app.state.db
+async def line_webhook_callback(request: Request, background_tasks: BackgroundTasks, db_service: FirestoreService = Depends(get_db_service)):
     try:
-        events = line_webhook_handler.parser.parse(body, signature) # parserだけ使う
-    except InvalidSignatureError: # ... (エラー処理)
-        print("ERROR_WEBHOOK: Invalid signature.")
-        raise HTTPException(status_code=400, detail="Invalid signature")
-    except Exception as e: # ... (エラー処理)
-        print(f"ERROR_WEBHOOK: Error parsing webhook body: {e}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail="Error parsing webhook body")
-
+        events = line_webhook_handler.parser.parse((await request.body()).decode('utf-8'), request.headers.get("X-Line-Signature"))
+    except InvalidSignatureError: raise HTTPException(status_code=400, detail="Invalid signature")
+    
     for event in events:
         user_id = event.source.user_id if event.source else "unknown_user"
-        print(f"INFO_WEBHOOK: Processing event for user_id: {user_id}, event_type: {event.type}")
-        if isinstance(event, MessageEvent):
-            if isinstance(event.message, WebhookImageMessageContent):
-                print(f"INFO_WEBHOOK: Image event from {user_id}. Msg ID: {event.message.id}. Adding to background.")
-                try:
-                    line_bot_api.reply_message(ReplyMessageRequest(
-                        reply_token=event.reply_token,
-                        messages=[MessagingTextMessage(text="画像を受け付けました。AIがシフト情報を解析しカレンダーに登録します。少々お待ちください…")]
-                    ))
-                    print(f"INFO_WEBHOOK: Sent ACK to {user_id} for image message.")
-                except Exception as e_ack:
-                    print(f"ERROR_WEBHOOK: Failed to send ACK for image message to {user_id}: {e_ack}")
-                background_tasks.add_task(
-                    process_image_and_calendar_registration,
-                    db_service,
-                    user_id,
-                    event.message.id
-                )
-            elif isinstance(event.message, WebhookTextMessageContent):
-                handle_text_message_sync(event)
-            else:
-                print(f"INFO_WEBHOOK: Received other message type from {user_id}: {event.message.type}")
+        if isinstance(event, MessageEvent) and isinstance(event.message, WebhookImageMessageContent):
+            try:
+                line_bot_api.reply_message(ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[MessagingTextMessage(text="画像を受け付けました。AIがシフト情報を解析します。完了したら通知しますね！")]
+                ))
+            except Exception as e: print(f"Failed to send ACK for image message to {user_id}: {e}")
+            background_tasks.add_task(process_image_and_send_confirm_url, db_service, user_id, event.message.id)
         elif isinstance(event, FollowEvent):
             await handle_follow_event(db_service, event)
-        else:
-            print(f"INFO_WEBHOOK: Received other event type: {event.type}")
+        elif isinstance(event, MessageEvent) and isinstance(event.message, WebhookTextMessageContent):
+            handle_text_message_sync(event)
     return "OK"
 
 
