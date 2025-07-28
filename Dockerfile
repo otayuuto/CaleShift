@@ -11,18 +11,24 @@ ENV PYTHONUNBUFFERED 1
 # 2. 作業ディレクトリの設定
 WORKDIR /app
 
-# 3. 依存関係のインストール (ビルドキャッシュを最大限活用する)
-# まず requirements.txt のみをコピーして、ライブラリをインストールします。
-# これにより、アプリケーションコードの変更だけでは、このステップは再実行されません。
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# ★★★ 3. ビルドに必要なツールをインストール ★★★
+# RUN コマンドを分割し、このステップを追加します。
+# これにより、C++コンパイラ (g++) などがインストールされます。
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential python3-dev
 
-# 4. アプリケーションコード全体をコピー
-# .dockerignore ファイルで不要なファイル (venv, .gitなど) が除外されていることが前提です。
-COPY . .
+# 4. 依存関係ファイルのコピー
+COPY ./requirements.txt /app/requirements.txt
 
-# 5. アプリケーションの起動コマンド
-# Cloud Runは環境変数 PORT でリッスンすべきポートをコンテナに渡します。
-# そのため、CMDで直接ポートを指定するよりも、環境変数を参照する方がより柔軟ですが、
-# 8080 を指定しておくのが一般的で、ほとんどの場合問題ありません。
+# 5. 依存関係をインストール
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# 6. アプリケーションコードのコピー
+COPY ./app /app/app
+COPY ./main.py /app/main.py
+COPY ./templates /app/templates
+# もし static ディレクトリも使用している場合は追加
+# COPY ./static /app/static
+
+# 7. アプリケーションの起動コマンド
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
