@@ -1,10 +1,14 @@
 # app/services/firestore_service.py
 # (HEADブランチとorigin/aoshiブランチの機能を統合・再構築)
 
-from google.cloud.firestore_v1 import AsyncClient as FirestoreAsyncClient, Query # AsyncClientとQueryをインポート
+from fastapi.concurrency import run_in_threadpool
+from google.cloud.firestore_v1 import AsyncClient as FirestoreAsyncClient, Query
 from datetime import datetime, timezone, timedelta
 import traceback
 from typing import List, Optional, Dict, Any
+from google.oauth2 import service_account
+import os
+import json
 
 from app.core.config import settings
 # アプリケーションのデータ構造を定義したPydanticモデルをインポート
@@ -14,30 +18,73 @@ from app.models.setting import (
     WorkplaceSharedSettings
 )
 from app.utils.image_parser import ShiftInfo
+try:
+    # Python 3.9+ の標準ライブラリ (推奨)
+    from zoneinfo import ZoneInfo
+    JST = ZoneInfo("Asia/Tokyo")
+except ImportError:
+    # Python 3.8以前用のフォールバック
+    JST = timezone(timedelta(hours=9), name='JST')
+    print("WARNING_FS_SERVICE: zoneinfo module not found. Using fixed +09:00 timezone (JST).")
 
 class FirestoreService:
-    """
-    Firestoreデータベースとのやり取りをカプセル化するサービスクラス。
-    非同期クライアント (AsyncClient) を使用します。
-    """
     def __init__(self):
-        # アプリケーション起動時に一度だけクライアントを初期化する
-        if settings.GCP_PROJECT_ID:
-            # ★ データベースID 'caleshiftdb' を明示的に指定
-            self.db_async = FirestoreAsyncClient(project=settings.GCP_PROJECT_ID, database="caleshiftdb")
-            print(f"INFO_FS_SERVICE: AsyncClient initialized for project '{settings.GCP_PROJECT_ID}', database 'caleshiftdb'.")
-        else:
-            # GCP_PROJECT_IDがない場合は、アプリケーションが正しく動作しない可能性が高い
-            print("CRITICAL_FS_SERVICE: GCP_PROJECT_ID is not set. Firestore client could not be initialized properly.")
+        if not settings.GCP_PROJECT_ID:
+            print("CRITICAL_FS_SERVICE: GCP_PROJECT_ID is not set.")
+            self.db_async = None
+            return
+
+        database_id_to_use = settings.DATABASE_ID or "(default)"
+        
+        try:
+            print(f"INFO_FS_SERVICE: Initializing AsyncClient for project '{settings.GCP_PROJECT_ID}', database '{database_id_to_use}'.")
+
+            # ★★★ 認証情報の解決ロジックを追加 ★★★
+            credentials = None
+            creds_env_var = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+
+            if creds_env_var:
+                print("DEBUG_FS_SERVICE: GOOGLE_APPLICATION_CREDENTIALS env var found.")
+                # 値がファイルパスかJSON文字列かを判定
+                if os.path.exists(creds_env_var):
+                    # ファイルパスの場合 (Secret Managerをファイルとしてマウントした場合)
+                    print("DEBUG_FS_SERVICE: Interpreting GOOGLE_APPLICATION_CREDENTIALS as a file path.")
+                    credentials = service_account.Credentials.from_service_account_file(creds_env_var)
+                else:
+                    # JSON文字列の場合 (Secret Managerを環境変数としてマウントした場合)
+                    print("DEBUG_FS_SERVICE: Interpreting GOOGLE_APPLICATION_CREDENTIALS as a JSON string.")
+                    try:
+                        creds_info = json.loads(creds_env_var)
+                        credentials = service_account.Credentials.from_service_account_info(creds_info)
+                    except json.JSONDecodeError:
+                        print("CRITICAL_FS_SERVICE: GOOGLE_APPLICATION_CREDENTIALS is not a valid file path or JSON string.")
+                        self.db_async = None
+                        return
+            else:
+                # GCP環境のメタデータサーバーなど、デフォルトの認証にフォールバック
+                print("INFO_FS_SERVICE: GOOGLE_APPLICATION_CREDENTIALS not set. Using default credentials from metadata server.")
+            
+            # credentials が解決できた場合でも、Noneの場合でも、
+            # FirestoreAsyncClient は credentials=None を受け入れ、自動認証を試みる
+            self.db_async = FirestoreAsyncClient(
+                project=settings.GCP_PROJECT_ID,
+                database=database_id_to_use,
+                credentials=credentials # ★ 明示的に渡す
+            )
+            
+            print(f"INFO_FS_SERVICE: AsyncClient initialized successfully.")
+        except Exception as e:
+            print(f"CRITICAL_FS_SERVICE: Failed to initialize Firestore AsyncClient: {e}")
+            traceback.print_exc()
             self.db_async = None
     
-    async def close_client(self):
+    def close_client(self):
         """アプリケーション終了時に非同期クライアントを閉じる"""
         if self.db_async:
-            await self.db_async.close()
+            self.db_async.close()
             print("INFO_FS_SERVICE: AsyncClient closed.")
 
-    # --- ユーザー関連のメソッド (HEADブランチの機能を移行) ---
+    # --- ユーザー関連のメソッド ---
 
     async def create_initial_user_document_on_follow(self, line_user_id: str, display_name: Optional[str] = None) -> bool:
         if not self.db_async: return False
@@ -105,21 +152,42 @@ class FirestoreService:
         try:
             history_collection_ref = self.db_async.collection('workplaces').document(workplace_id).collection('shift_history')
             history_doc_ref = history_collection_ref.document()
+
+            # ★★★ ここからがタイムゾーン処理の修正箇所 ★★★
+
+            # 1. shift_infoからnaiveなdatetimeオブジェクトを作成
+            start_datetime_naive = datetime.combine(shift_info.date, shift_info.start_time)
+            end_datetime_naive = datetime.combine(shift_info.date, shift_info.end_time)
+
+            # 2. JSTタイムゾーンを付与してawareオブジェクトにする
+            start_datetime_aware = start_datetime_naive.replace(tzinfo=JST)
+            end_datetime_aware = end_datetime_naive.replace(tzinfo=JST)
+
+            # 3. 日付またぎの処理
+            if end_datetime_aware <= start_datetime_aware:
+                end_datetime_aware += timedelta(days=1)
             
-            start_dt = datetime.combine(shift_info.date, shift_info.start_time).replace(tzinfo=timezone.utc)
-            end_dt = datetime.combine(shift_info.date, shift_info.end_time).replace(tzinfo=timezone.utc)
-            if end_dt <= start_dt: end_dt += timedelta(days=1)
-            
+            # 4. (デバッグ用) UTCに変換した時刻が期待通りか確認
+            #    JST 17:30 -> UTC 08:30 になるはず
+            print(f"DEBUG_FS_SERVICE (log_shift_history): JST Start: {start_datetime_aware.isoformat()}, UTC Start: {start_datetime_aware.astimezone(timezone.utc).isoformat()}")
+
             history_data = {
-                'user_id': line_user_id, 'date': shift_info.date.strftime("%Y-%m-%d"),
-                'start_time': start_dt, 'end_time': end_dt, 'calendar_event_id': calendar_event_id,
-                'status': status, 'created_at': datetime.now(timezone.utc), 'updated_at': datetime.now(timezone.utc),
-                'name_in_shift': shift_info.name, 'role': shift_info.role, 'memo': shift_info.memo,
+                'user_id': line_user_id,
+                'date': shift_info.date.strftime("%Y-%m-%d"),
+                # awareなdatetimeオブジェクトを渡せば、FirestoreライブラリがUTCに変換して保存する
+                'start_time': start_datetime_aware,
+                'end_time': end_datetime_aware,
+                'calendar_event_id': calendar_event_id,
+                'status': status,
+                'created_at': datetime.now(timezone.utc),
+                'updated_at': datetime.now(timezone.utc),
+                'name_in_shift': shift_info.name,
+                'role': shift_info.role,
+                'memo': shift_info.memo,
             }
-            # Noneのフィールドは保存しないようにする
             history_data = {k: v for k, v in history_data.items() if v is not None}
+            
             await history_doc_ref.set(history_data)
-            print(f"INFO_FS_SERVICE: Logged shift to history for user {line_user_id} in wp {workplace_id}.")
             return True
         except Exception as e:
             print(f"ERROR_FS_SERVICE: Failed to log shift history for {line_user_id}, wp {workplace_id}: {e}")

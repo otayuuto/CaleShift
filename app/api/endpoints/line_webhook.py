@@ -102,7 +102,7 @@ async def process_image_and_calendar_registration(
 
         # 確認用LIFF URLを組み立てる (LIFFのエンドポイントURLは .env で管理するのが望ましい)
         confirm_liff_endpoint = "/liff/shifts/confirm" # フェーズ2で作成するLIFFページのパス
-        confirm_url = f"{settings.NGROK_URL}{confirm_liff_endpoint}?pending_id={pending_id}"
+        confirm_url = f"{settings.SERVICE_URL}{confirm_liff_endpoint}?pending_id={pending_id}"
         
         final_reply_text = (
             f"AIが {len(parsed_shift_data_list)} 件のシフト情報を読み取りました。\n\n"
@@ -204,9 +204,9 @@ async def handle_follow_event(db_service: FirestoreService, event: FollowEvent):
     success = await db_service.create_initial_user_document_on_follow(line_user_id, display_name)
     if success:
         message_text = "友だち追加ありがとうございます！シフト管理ボットです。"
-        if settings.NGROK_URL:
+        if settings.SERVICE_URL:
             # LIFFのGoogleカレンダー連携設定ページへのURLを案内する
-            liff_auth_url = f"{settings.NGROK_URL}/liff/google-calendar-auth" # liff_settings.pyで定義したパス
+            liff_auth_url = f"{settings.SERVICE_URL}/liff/google-calendar-auth" # liff_settings.pyで定義したパス
             # LIFF URLにline_idを含める必要はない (LIFF SDKが取得するため)
             message_text += (
                 "\n\nシフトをカレンダーに自動登録するには、Googleアカウントとの連携が必要です。"

@@ -1,24 +1,28 @@
+# Dockerfile (修正・最適化後)
+
 # 1. ベースイメージの選択
-FROM python:3.13.13-slim
+# 安定しており、広く使われているバージョン（例: 3.11-slim）を使用します。
+# あなたのローカル開発環境のPythonバージョンに合わせるのが理想的です。
+FROM python:3.11-slim
+
+# 環境変数を設定 (Pythonのバッファリングを無効にし、ログがすぐに出力されるようにする)
+ENV PYTHONUNBUFFERED 1
 
 # 2. 作業ディレクトリの設定
 WORKDIR /app
 
-# 3. 依存関係ファイルのコピーとインストール
-COPY ./requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+# 3. 依存関係のインストール (ビルドキャッシュを最大限活用する)
+# まず requirements.txt のみをコピーして、ライブラリをインストールします。
+# これにより、アプリケーションコードの変更だけでは、このステップは再実行されません。
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# 4. アプリケーションコードのコピー
-COPY ./app /app/app
-COPY ./main.py /app/main.py
-COPY ./templates /app/templates
-# もし static ディレクトリも使用している場合は追加
-# COPY ./static /app/static
+# 4. アプリケーションコード全体をコピー
+# .dockerignore ファイルで不要なファイル (venv, .gitなど) が除外されていることが前提です。
+COPY . .
 
-# 5. アプリケーションがリッスンするポート (Uvicornの起動コマンドで指定)
-# EXPOSE 8080 # ドキュメンテーションとして
-
-# 6. アプリケーションの起動コマンド
-# CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"] # 通常のCMD
-CMD ["sh", "-c", "python main.py || true && uvicorn main:app --host 0.0.0.0 --port 8080"] # 現在のデバッグ用CMD
+# 5. アプリケーションの起動コマンド
+# Cloud Runは環境変数 PORT でリッスンすべきポートをコンテナに渡します。
+# そのため、CMDで直接ポートを指定するよりも、環境変数を参照する方がより柔軟ですが、
+# 8080 を指定しておくのが一般的で、ほとんどの場合問題ありません。
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

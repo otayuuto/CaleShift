@@ -175,3 +175,5 @@ cython_debug/
 
 # secretsフォルダとその中身を無視する
 secrets/
+
+env.yaml

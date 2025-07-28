@@ -88,7 +88,7 @@ async def analyze_shift_image_with_rules(
 
     response_content_str = None
     try:
-        print(f"DEBUG_OPENAI_SERVICE: Attempting OpenAI API call with model: {settings.OPENAI_MODEL_NAME or 'gpt-4o-mini'}.")
+        print(f"DEBUG_OPENAI_SERVICE: Attempting OpenAI API call with model: {settings.OPENAI_MODEL_NAME or 'gpt-4.1-mini-2025-04-14'}.")
         client = openai.OpenAI(api_key=settings.OPENAI_API_KEY)
         
         # ★★★ API呼び出しの直前にもう一度ログ ★★★

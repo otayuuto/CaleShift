@@ -26,8 +26,8 @@ class Settings(BaseSettings):
     GOOGLE_OAUTH_REDIRECT_URI: str # これはGCPコンソールに登録する主要なリダイレクトURI
     GOOGLE_CALENDAR_SCOPES: str = "https://www.googleapis.com/auth/calendar.events"
 
-    # NGROK URL (オプショナル)
-    NGROK_URL: Optional[str] = None  # <<<--- この行を追加 (オプショナルとして)
+    # SERVICE URL (オプショナル)
+    SERVICE_URL: Optional[str] = None
 
     # ENVIRONMENT (オプショナル、デフォルトは "local")
     ENVIRONMENT: str = "local" # get_google_oauth_flow で使用しているため
@@ -40,5 +40,7 @@ class Settings(BaseSettings):
     # model_config = {
     #     "extra": "ignore"
     # }
+
+    DATABASE_ID: Optional[str] = "caleshiftdb"
 
 settings = Settings()
