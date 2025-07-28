@@ -168,41 +168,38 @@
         }
 
         // --- メインロジック ---
-        async function initializeLiff() {
+                async function initializeLiff() {
             try {
                 messageArea.textContent = "初期化中...";
                 messageArea.className = 'info-message';
 
                 await liff.init({ liffId: liffId });
 
-                if (liff.getOS() === 'web') {
-                    // PCブラウザの場合の処理 (変更なし)
-                    lineUserId = "pc-test-user-001";
-                    messageArea.textContent = `PCブラウザモード (テスト用ID: ${lineUserId})`;
-                    messageArea.className = 'info-message';
-                } else if (liff.isLoggedIn()) {
-                    // スマートフォンLIFFでログイン済み (認可済み) の場合の処理 (変更なし)
+                // ★★★ PCブラウザ用の特別な分岐を削除し、ログイン状態の確認に統一 ★★★
+                if (liff.isLoggedIn()) {
+                    // PCブラウザでもスマートフォンLIFFでも、すでにログイン済(認可済)の場合
                     const profile = await liff.getProfile();
                     lineUserId = profile.userId;
-                    messageArea.textContent = `ログインユーザー: ${profile.displayName}`; // ユーザー名を表示するのも良い
+                    
+                    let osType = liff.getOS();
+                    messageArea.textContent = `ログインユーザー: ${profile.displayName} (${osType}環境)`;
                     messageArea.className = 'info-message';
+
                 } else {
-                    // ★★★ スマートフォンLIFFで未ログイン (未認可) の場合の処理 ★★★
+                    // 未ログイン(未認可)の場合 (PCブラウザでもスマホLIFFでもここに来る)
                     messageArea.textContent = "LINEログインとアプリへの許可が必要です。ログインページに移動します...";
                     messageArea.className = 'info-message';
                     
-                    // ユーザーに認可を求めるためのログイン画面に遷移させる
-                    liff.login(); 
-                    
-                    // liff.login() はページを離れるため、これ以降の処理は実行されない。
-                    // 念のため return で関数を抜ける。
-                    return; 
+                    liff.login(); // ログインページにリダイレクト
+                    return;
                 }
-
+                
                 // ユーザーIDが取得できた場合のみ、次の処理に進む
                 if (lineUserId) {
                     await loadWorkplaces();
                     showStep(step1Div);
+                } else {
+                    handleError(new Error("ユーザーIDの取得に失敗しました。"), "ユーザーID取得");
                 }
                 
             } catch (error) {
