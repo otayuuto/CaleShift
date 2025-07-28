@@ -26,15 +26,21 @@ class Settings(BaseSettings):
     GOOGLE_OAUTH_REDIRECT_URI: str # これはGCPコンソールに登録する主要なリダイレクトURI
     GOOGLE_CALENDAR_SCOPES: str = "https://www.googleapis.com/auth/calendar.events"
 
-    # NGROK URL (オプショナル)
-    NGROK_URL: Optional[str] = None  # <<<--- この行を追加 (オプショナルとして)
+    # SERVICE URL (オプショナル)
+    SERVICE_URL: Optional[str] = None
 
     # ENVIRONMENT (オプショナル、デフォルトは "local")
     ENVIRONMENT: str = "local" # get_google_oauth_flow で使用しているため
+
+    #OPENAI API
+    OPENAI_API_KEY: Optional[str] = None
+    OPENAI_MODEL_NAME: str = "gpt-4.1-mini-2025-04-14"
 
     # model_config などは必要に応じて
     # model_config = {
     #     "extra": "ignore"
     # }
+
+    DATABASE_ID: Optional[str] = "caleshiftdb"
 
 settings = Settings()
