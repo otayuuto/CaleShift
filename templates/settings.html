@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>シフト設定</title>
+    <style>
+        :root {
+            --primary-color: #05B4C8;
+            --secondary-color: #DFF7F9;
+            --accent-color: #FF9B00;
+            --text-color: #333333;
+            --background-color: #FFFFFF;
+        }
+        body { font-family: 'Noto Sans JP', sans-serif; background-color: var(--background-color); color: var(--text-color); margin: 20px; }
+        h1, h2 { color: var(--primary-color); text-align: center; margin-top: 20px; }
+        form { background: var(--secondary-color); padding: 20px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1); max-width: 600px; margin: 0 auto; }
+        .form-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 6px; font-weight: bold; color: #4a4a4a; }
+        input[type="text"], select, textarea { width: 100%; padding: 10px 12px; border: 1px solid #ccc; border-radius: 8px; box-sizing: border-box; font-size: 14px; background-color: #fff; transition: border-color 0.3s ease; }
+        input[type="text"]:focus, select:focus, textarea:focus { border-color: #4a90e2; outline: none; }
+        textarea { min-height: 80px; resize: vertical; }
+        .checkbox-group label { font-weight: normal; display: inline-block; margin-right: 15px; background: var(--secondary-color); padding: 6px 10px; border-radius: 6px; cursor: pointer; }
+        .checkbox-group input[type="checkbox"] { margin-right: 6px; }
+        button { background-color: var(--accent-color); color: white; padding: 12px 20px; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; transition: background-color 0.3s ease; display: block; width: 100%; margin-top: 10px; }
+        button:hover { background-color: #e68a00; }
+        .hidden { display: none; }
+        #messageArea { text-align: center; margin-top: 15px; padding: 10px; border-radius: 6px; }
+        .success-message { color: #188038; background-color: #e6ffed; border: 1px solid #b7ebc9; }
+        .error-message { color: #d93025; background-color: #ffeeee; border: 1px solid #ffc2c2; }
+        .info-message { color: #00529B; background-color: #e6f3ff; border: 1px solid #b7d9eb; }
+        fieldset { border: 1px solid #ccc; border-radius: 6px; padding: 15px; margin-bottom: 20px; }
+        legend { font-weight: bold; color: var(--primary-color); padding: 0 10px; }
+        #debugArea { border: 2px dashed #ffc2c2; background-color: #fff5f5; color: #a00; max-height: 350px; overflow-y: auto; font-family: monospace; font-size: 0.9em; line-height: 1.4; white-space: pre-wrap; word-break: break-all; margin-top: 15px; padding: 12px 15px; border-radius: 6px; }
+    </style>
+    <script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <h1>シフト読み取り設定</h1>
+        <div id="messageArea"></div>
+        <!-- <div id="debugArea" class="hidden"></div> ★ デバッグエリアはHTMLから削除 -->
+
+        <div id="step1WorkplaceSelection" class="container">
+            <h2>ステップ1: バイト先を選択または新規登録</h2>
+            <div class="form-group">
+                <label for="existingWorkplaces">既存のバイト先:</label>
+                <select id="existingWorkplaces" name="existingWorkplaces"><option value="">-- 読込中... --</option></select>
+                <button type="button" id="selectWorkplaceBtn" style="margin-top: 10px;">このバイト先で設定する</button>
+            </div>
+            <p style="text-align: center; margin: 15px 0;">または</p>
+            <button type="button" id="showNewWorkplaceFormBtn">新しいバイト先を登録する</button>
+        </div>
+        <div id="newWorkplaceFormContainer" class="container hidden">
+            <h2>ステップ2a: 新しいバイト先の共通ルールを登録</h2>
+            <form id="newWorkplaceForm">
+                <div class="form-group">
+                    <label for="newWorkplaceName">バイト先名:</label>
+                    <input type="text" id="newWorkplaceName" name="newWorkplaceName" required>
+                </div>
+                <fieldset>
+                    <legend>日付のルール</legend>
+                    <div class="form-group">
+                        <label for="newDateFormatType">日付の主な形式:</label>
+                        <select id="newDateFormatType" name="newDateFormatType">
+                            <option value="YYYY/MM/DD">YYYY/MM/DD</option>
+                            <option value="MM/DD">MM/DD</option>
+                            <option value="MM月DD日">MM月DD日</option>
+                            <option value="DD日 (曜日)">DD日 (曜日)</option>
+                            <option value="DD">DD</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="newDateCustomDescription">日付に関する補足情報 (ヒント):</label>
+                        <textarea id="newDateCustomDescription" name="newDateCustomDescription" placeholder="例: 各行の左端, 表の一番上の行"></textarea>
+                    </div>
+                </fieldset>
+                <fieldset>
+                    <legend>時間のルール</legend>
+                    <div class="form-group">
+                        <label for="newTimeFormatType">時間の主な形式:</label>
+                        <select id="newTimeFormatType" name="newTimeFormatType">
+                            <option value="HH:MM-HH:MM">HH:MM-HH:MM</option>
+                            <option value="HH-HH">HH-HH</option>
+                            <option value="HH時～HH時">HH時～HH時</option>
+                            <option value="開始時刻と終了時刻が別々の欄">開始時刻と終了時刻が別々の欄</option>
+                            <option value="H">H</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>"休み" の表記 (複数選択可):</label>
+                        <div class="checkbox-group">
+                            <label><input type="checkbox" name="newRestIndicator" value="休"> 休</label>
+                            <label><input type="checkbox" name="newRestIndicator" value="OFF"> OFF</label>
+                            <label><input type="checkbox" name="newRestIndicator" value="×"> ×</label>
+                            <label><input type="checkbox" name="newRestIndicator" value="／"> ／</label>
+                            <label><input type="checkbox" name="newRestIndicator" value="空白セル"> 空白セル</label>
+                            <label><input type="checkbox" name="newRestIndicator" value="指定なし"> 指定なし</label>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="newTimeCustomDescription">時間に関する補足情報 (ヒント):</label>
+                        <textarea id="newTimeCustomDescription" name="newTimeCustomDescription" placeholder="例: 時間は名前のすぐ右のセル"></textarea>
+                    </div>
+                </fieldset>
+                <button type="submit">このバイト先を登録</button>
+                <button type="button" id="cancelNewWorkplaceBtn" style="margin-top:5px;">キャンセル</button>
+            </form>
+        </div>
+        <div id="mySettingFormContainer" class="container hidden">
+            <h2 id="mySettingWorkplaceName"></h2>
+            <form id="mySettingForm">
+                <input type="hidden" id="selectedWorkplaceId" name="selectedWorkplaceId">
+                <div class="form-group">
+                    <label for="targetNameInShift">このバイト先のシフト表でのあなたの名前:</label>
+                    <input type="text" id="targetNameInShift" name="targetNameInShift" required>
+                </div>
+                <button type="submit">この名前で設定を保存</button>
+                <button type="button" id="backToWorkplaceSelectionBtn" style="margin-top:5px;">バイト先選択に戻る</button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        let lineUserId = null;
+        // ★★★ 1. あなたのLIFF IDに置き換えてください ★★★
+        let liffId = "2007484618-lebNA4n8"; // 例: "2007484618-lebNa4n8"
+
+        // ★★★ 2. あなたの現在のngrokのHTTPS URL (末尾スラッシュなし) に置き換えてください ★★★
+        const API_BASE_URL = "https://caleshift-service-dev-822292825577.asia-northeast1.run.app"; // 例: "https://xxxx.ngrok-free.app"
+
+        // --- DOM要素の取得 ---
+        const messageArea = document.getElementById('messageArea');
+        const targetNameInShiftInput = document.getElementById('targetNameInShift');
+        const step1Div = document.getElementById('step1WorkplaceSelection');
+        const newWorkplaceFormContainer = document.getElementById('newWorkplaceFormContainer');
+        const mySettingFormContainer = document.getElementById('mySettingFormContainer');
+        const existingWorkplacesSelect = document.getElementById('existingWorkplaces');
+        const selectWorkplaceBtn = document.getElementById('selectWorkplaceBtn');
+        const showNewWorkplaceFormBtn = document.getElementById('showNewWorkplaceFormBtn');
+        const newWorkplaceForm = document.getElementById('newWorkplaceForm');
+        const cancelNewWorkplaceBtn = document.getElementById('cancelNewWorkplaceBtn');
+        const mySettingForm = document.getElementById('mySettingForm');
+        const mySettingWorkplaceNameHeader = document.getElementById('mySettingWorkplaceName');
+        const selectedWorkplaceIdInput = document.getElementById('selectedWorkplaceId');
+        const backToWorkplaceSelectionBtn = document.getElementById('backToWorkplaceSelectionBtn');
+
+        // --- ヘルパー関数 ---
+        function handleError(error, context) {
+            console.error(`Error in ${context}:`, error);
+            messageArea.textContent = `エラーが発生しました。時間をおいて再度お試しください。`;
+            messageArea.className = 'error-message';
+        }
+
+        async function apiFetch(url, options = {}) {
+            if (!options.headers) { options.headers = {}; }
+            options.cache = 'no-cache';
+            const response = await fetch(url, options);
+            if (!response.ok) {
+                let errorMsg = `サーバーとの通信に失敗しました (ステータス: ${response.status})`;
+                try {
+                    const errorJson = await response.json();
+                    if (errorJson.detail) { errorMsg = errorJson.detail; }
+                } catch(e) { /* JSONパース失敗時は何もしない */ }
+                throw new Error(errorMsg);
+            }
+            return response;
+        }
+
+        // --- メインロジック ---
+                async function initializeLiff() {
+            try {
+                messageArea.textContent = "初期化中...";
+                messageArea.className = 'info-message';
+
+                await liff.init({ liffId: liffId });
+
+                // ★★★ PCブラウザ用の特別な分岐を削除し、ログイン状態の確認に統一 ★★★
+                if (liff.isLoggedIn()) {
+                    // PCブラウザでもスマートフォンLIFFでも、すでにログイン済(認可済)の場合
+                    const profile = await liff.getProfile();
+                    lineUserId = profile.userId;
+                    
+                    let osType = liff.getOS();
+                    messageArea.textContent = `ログインユーザー: ${profile.displayName} (${osType}環境)`;
+                    messageArea.className = 'info-message';
+
+                } else {
+                    // 未ログイン(未認可)の場合 (PCブラウザでもスマホLIFFでもここに来る)
+                    messageArea.textContent = "LINEログインとアプリへの許可が必要です。ログインページに移動します...";
+                    messageArea.className = 'info-message';
+                    
+                    liff.login(); // ログインページにリダイレクト
+                    return;
+                }
+                
+                // ユーザーIDが取得できた場合のみ、次の処理に進む
+                if (lineUserId) {
+                    await loadWorkplaces();
+                    showStep(step1Div);
+                } else {
+                    handleError(new Error("ユーザーIDの取得に失敗しました。"), "ユーザーID取得");
+                }
+                
+            } catch (error) {
+                handleError(error, "LIFF初期化");
+            }
+        }
+
+        function showStep(stepElement) {
+            [step1Div, newWorkplaceFormContainer, mySettingFormContainer].forEach(div => div.classList.add('hidden'));
+            if(stepElement) stepElement.classList.remove('hidden');
+        }
+
+        async function loadWorkplaces() {
+            if (!lineUserId) return;
+            try {
+                messageArea.textContent = "バイト先一覧を読み込み中...";
+                messageArea.className = 'info-message';
+                const response = await apiFetch(`${API_BASE_URL}/api/v1/workplaces`, { method: 'GET' });
+                const workplaces = await response.json();
+                
+                existingWorkplacesSelect.innerHTML = '<option value="">-- 選択してください --</option>';
+                if (workplaces && workplaces.length > 0) {
+                    workplaces.forEach(wp => {
+                        const option = document.createElement('option');
+                        option.value = wp.workplace_id;
+                        option.textContent = wp.workplace_name;
+                        existingWorkplacesSelect.appendChild(option);
+                    });
+                    messageArea.textContent = "バイト先を選択または新規登録してください。";
+                } else {
+                    messageArea.textContent = "登録済みのバイト先はありません。";
+                }
+                messageArea.className = 'info-message';
+            } catch (error) {
+                handleError(error, "バイト先一覧の読み込み");
+            }
+        }
+
+        async function prepareMySettingForm(workplaceId, workplaceName) {
+            mySettingWorkplaceNameHeader.textContent = `バイト先: ${workplaceName}`;
+            selectedWorkplaceIdInput.value = workplaceId;
+            targetNameInShiftInput.value = "";
+            showStep(mySettingFormContainer);
+            messageArea.textContent = `「${workplaceName}」のあなたの名前設定を読み込み中...`;
+            messageArea.className = 'info-message';
+            try {
+                const response = await apiFetch(`${API_BASE_URL}/api/v1/users/${lineUserId}/my-workplace-settings/${workplaceId}`, { method: 'GET' });
+                if (response.status === 200 && response.headers.get("content-type")?.includes("application/json")) {
+                     const setting = await response.json();
+                     if (setting && setting.target_name_in_shift) {
+                        targetNameInShiftInput.value = setting.target_name_in_shift;
+                        messageArea.textContent = `既存の設定を読み込みました。変更も可能です。`;
+                        messageArea.className = 'success-message';
+                     } else {
+                        messageArea.textContent = `あなたの名前は未設定です。新しく入力してください。`;
+                        messageArea.className = 'info-message';
+                     }
+                } else {
+                    messageArea.textContent = `あなたの名前は未設定です。新しく入力してください。`;
+                    messageArea.className = 'info-message';
+                }
+            } catch (error) {
+                handleError(error, "既存の名前設定の読み込み");
+            }
+        }
+
+        // --- イベントリスナー ---
+        showNewWorkplaceFormBtn.addEventListener('click', () => {
+            showStep(newWorkplaceFormContainer); newWorkplaceForm.reset();
+            messageArea.textContent = "新しいバイト先の情報を入力してください。"; messageArea.className = 'info-message';
+        });
+        cancelNewWorkplaceBtn.addEventListener('click', () => { showStep(step1Div); });
+        backToWorkplaceSelectionBtn.addEventListener('click', () => { showStep(step1Div); });
+        selectWorkplaceBtn.addEventListener('click', () => {
+            const selectedId = existingWorkplacesSelect.value;
+            if (selectedId) {
+                const selectedName = existingWorkplacesSelect.options[existingWorkplacesSelect.selectedIndex].text;
+                prepareMySettingForm(selectedId, selectedName);
+            } else {
+                messageArea.textContent = "バイト先を選択してください。";
+                messageArea.className = 'info-message';
+            }
+        });
+
+        newWorkplaceForm.addEventListener('submit', async function(event) {
+            event.preventDefault();
+            const formData = new FormData(newWorkplaceForm);
+            const newRestIndicators = Array.from(newWorkplaceForm.querySelectorAll('input[name="newRestIndicator"]:checked')).map(cb => cb.value);
+            const payload = {
+                workplace_name: formData.get('newWorkplaceName'),
+                settings: {
+                    date_rules: { format_type: formData.get('newDateFormatType'), custom_description: formData.get('newDateCustomDescription') || null },
+                    time_rules: { format_type: formData.get('newTimeFormatType'), rest_indicators: newRestIndicators, custom_description: formData.get('newTimeCustomDescription') || null }
+                },
+                current_line_user_id: lineUserId
+            };
+            try {
+                messageArea.textContent = "バイト先を登録中...";
+                messageArea.className = 'info-message';
+                const response = await apiFetch(`${API_BASE_URL}/api/v1/workplaces`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+                });
+                const result = await response.json();
+                messageArea.textContent = `バイト先「${result.workplace_name}」を登録しました。`;
+                messageArea.className = 'success-message';
+                await loadWorkplaces();
+                prepareMySettingForm(result.workplace_id, result.workplace_name);
+            } catch (error) {
+                handleError(error, "新しいバイト先の登録");
+            }
+        });
+
+        mySettingForm.addEventListener('submit', async function(event) {
+            event.preventDefault();
+            const currentWorkplaceId = selectedWorkplaceIdInput.value;
+            const payload = { target_name_in_shift: targetNameInShiftInput.value };
+            try {
+                messageArea.textContent = "設定を保存中...";
+                messageArea.className = 'info-message';
+                const response = await apiFetch(`${API_BASE_URL}/api/v1/users/${lineUserId}/my-workplace-settings/${currentWorkplaceId}`, {
+                    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+                });
+                const result = await response.json();
+                const workplaceNameForDisplay = mySettingWorkplaceNameHeader.textContent.replace("バイト先: ", "");
+                 messageArea.textContent = `バイト先「${workplaceNameForDisplay}」での名前「${result.target_name_in_shift}」を保存しました。`;
+                messageArea.className = 'success-message';
+
+                // 2秒(2000ミリ秒)待ってから、プルダウンを更新してステップ1に戻る
+                setTimeout(async () => {
+                    await loadWorkplaces();
+                    showStep(step1Div);
+                    // 2秒後にメッセージをリセット（任意）
+                    messageArea.textContent = "バイト先を選択または新規登録してください。";
+                    messageArea.className = 'info-message';
+                }, 2000); 
+            } catch (error) {
+                handleError(error, "あなたの名前設定の保存");
+            }
+        });
+
+        document.addEventListener('DOMContentLoaded', initializeLiff);
+    </script>
+</body>
+</html>
