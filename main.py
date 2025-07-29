@@ -1,5 +1,6 @@
-# main.py (修正・統合後)
-from fastapi import FastAPI
+# CaleShift/main.py
+
+from fastapi import FastAPI, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,8 +14,6 @@ from google.cloud import firestore # startup_eventで使うのでインポート
 
 # 設定ファイルをインポート
 from app.core.config import settings
-
-# APIルーターをインポート
 from app.api.routers import api_router
 from app.api.endpoints import liff_settings
 from app.api.endpoints import shift_management # shift_managementもインポート
@@ -22,7 +21,6 @@ from app.api.endpoints import shift_management # shift_managementもインポー
 # FirestoreService クラスをインポート
 from app.services.firestore_service import FirestoreService
 
-# プロジェクトのベースディレクトリを取得
 BASE_DIR = Path(__file__).resolve().parent
 
 # FastAPIアプリケーションインスタンスの作成
@@ -71,6 +69,9 @@ async def shutdown_event():
 origins = [
     "https://liff.line.me",
     "https://miniapp.line.me",
+    "https://caleshift-service-822292825577.asia-northeast1.run.app", # Cloud RunのURL
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
 ]
 # .env や env.yaml で設定された SERVICE_URL を許可オリジンに追加
 if settings.SERVICE_URL:
@@ -87,7 +88,6 @@ app.add_middleware(
 )
 print(f"INFO: CORS middleware configured with origins: {origins}")
 
-# セッションミドルウェア
 app.add_middleware(SessionMiddleware, secret_key=settings.SESSION_SECRET_KEY)
 print("INFO: Session middleware configured.")
 
@@ -102,7 +102,6 @@ if static_dir.is_dir():
 else:
     print(f"WARNING: Static directory not found at {static_dir}.")
 
-# Jinja2テンプレートの設定
 templates_dir = BASE_DIR / "templates"
 if templates_dir.is_dir():
     app.state.templates = Jinja2Templates(directory=templates_dir)
@@ -111,20 +110,21 @@ else:
     print(f"WARNING: Templates directory not found at {templates_dir}.")
     app.state.templates = None
 
+# ★★★ APIルーターのインクルード ★★★
+app.include_router(api_router, prefix=settings.API_V1_STR)
+app.include_router(liff_settings.router, tags=["LIFF"])
+#app.include_router(liff_settings.router)
+app.include_router(shift_management.router)
 
-# --- APIルーターのインクルード ---
-
-app.include_router(api_router, prefix=settings.API_V1_STR) # LINE Webhook, Google OAuthなど
-app.include_router(liff_settings.router) # LIFFページ表示、バイト先設定APIなど
-app.include_router(shift_management.router) # シフト履歴、登録確定APIなど
-
-
-# --- ルートとデバッグエンドポイント ---
-
-@app.get("/", tags=["Root"])
+# ★★★ ルートエンドポイント (起動エラーチェック機能付き) ★★★
+@app.get("/", response_class=Response, include_in_schema=False)
 async def read_root():
-    return {"message": f"Welcome to {settings.PROJECT_NAME}!"}
+    if hasattr(app.state, 'startup_error') and app.state.startup_error:
+        content = "--- APPLICATION STARTUP FAILED ---\n\n" + app.state.startup_error
+        return Response(content=content, media_type="text/plain", status_code=503)
+    return Response(content="Welcome! CaleShift application is running.", media_type="text/plain")
 
+# ★★★ デバッグエンドポイント ★★★
 @app.get("/config-check", tags=["Utility"], include_in_schema=False)
 async def check_config():
     db_status = "Not available in app.state"
@@ -155,6 +155,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     # host は 0.0.0.0 を基本とする (コンテナ環境では必須)
     host = getattr(settings, "HOST", "0.0.0.0")
-
     print(f"INFO: Starting Uvicorn server on {host}:{port}")
     uvicorn.run("main:app", host=host, port=port, reload=True)

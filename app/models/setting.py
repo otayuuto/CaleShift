@@ -10,7 +10,6 @@ DateFormatType = Literal[
     "MM/DD",
     "MM月DD日",
     "DD日 (曜日)",
-    "DD",
 ]
 
 TimeFormatType = Literal[
@@ -18,7 +17,6 @@ TimeFormatType = Literal[
     "HH-HH",
     "HH時～HH時",
     "開始時刻と終了時刻が別々の欄",
-    "H",
 ]
 
 RestIndicatorType = Literal[
@@ -47,11 +45,11 @@ class WorkplaceSharedSettings(BaseModel):
     date_rules: DateRule
     time_rules: TimeRule
 
-class WorkplaceCreatePayload(WorkplaceBase): # APIリクエストボディ用
+class WorkplaceCreatePayload(WorkplaceBase):
     settings: WorkplaceSharedSettings
-    current_line_user_id: str # このバイト先情報を登録するユーザーのID
+    current_line_user_id: str
 
-class WorkplaceResponse(WorkplaceBase): # APIレスポンス用
+class WorkplaceResponse(WorkplaceBase):
     workplace_id: str = Field(..., description="Firestoreでのバイト先ドキュメントID")
     settings: WorkplaceSharedSettings
     created_by_user_id: str = Field(..., description="このバイト先情報を最初に登録したユーザーのID")
@@ -66,10 +64,10 @@ class WorkplaceResponse(WorkplaceBase): # APIレスポンス用
 class MyWorkplaceSettingBase(BaseModel):
     target_name_in_shift: str = Field(..., min_length=1, description="このバイト先のシフト表における自分の名前")
 
-class MyWorkplaceSettingCreatePayload(MyWorkplaceSettingBase): # APIリクエストボディ用
+class MyWorkplaceSettingCreatePayload(MyWorkplaceSettingBase):
     pass
 
-class MyWorkplaceSettingResponse(MyWorkplaceSettingBase): # APIレスポンス用
+class MyWorkplaceSettingResponse(MyWorkplaceSettingBase):
     workplace_id: str = Field(..., description="対象となるバイト先のID")
     line_user_id: str = Field(..., description="この設定の持ち主であるユーザーのID")
     linked_at: datetime
