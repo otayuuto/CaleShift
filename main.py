@@ -7,55 +7,65 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from pathlib import Path
 import traceback
-
-from app.api.endpoints import shift_management
+from google.oauth2 import service_account # ★ インポート追加
+import json # ★ インポート追加
+import os # ★ インポート追加
+from google.cloud import firestore # startup_eventで使うのでインポート
 
 # 設定ファイルをインポート
 from app.core.config import settings
 from app.api.routers import api_router
 from app.api.endpoints import liff_settings
+from app.api.endpoints import shift_management # shift_managementもインポート
+
+# FirestoreService クラスをインポート
 from app.services.firestore_service import FirestoreService
 
 BASE_DIR = Path(__file__).resolve().parent
 
+# FastAPIアプリケーションインスタンスの作成
 app = FastAPI(
     title=settings.PROJECT_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json"
 )
 
-# ★★★ アプリケーション起動・終了イベントを修正 ★★★
-#@app.on_event("startup")
-#async def startup_event():
+# --- アプリケーション起動・終了イベント ---
+@app.on_event("startup")
+async def startup_event():
+    """
+    アプリケーション起動時に実行される処理。
+    FirestoreServiceのインスタンスを生成し、app.stateに格納します。
+    認証情報の解決はFirestoreServiceの__init__内で行われます。
+    """
+    print(f"INFO: Application startup process begins for {settings.PROJECT_NAME}...")
+    try:
+        # ★★★ FirestoreService() を引数なしで呼び出すだけ ★★★
+        # FirestoreServiceの__init__が環境変数を元に自動で認証します
+        app.state.db_service = FirestoreService()
+        
+        if app.state.db_service and app.state.db_service.db_async:
+             print(f"INFO: FirestoreService initialized successfully and stored in app.state.db_service.")
+        else:
+             print("CRITICAL_ERROR: FirestoreService initialization failed. Check logs from firestore_service.py.")
+    except Exception as e:
+        print(f"CRITICAL_ERROR: An unhandled exception occurred during startup: {e}")
+        traceback.print_exc()
+        app.state.db_service = None
     
-    #app.state.startup_error = None
-    #try:
-        # FirestoreServiceのインスタンスを一度だけ生成
-        #db_service = FirestoreService()
-        # app.stateに格納して、依存性注入で再利用できるようにする
-        #app.state.db_service = db_service
-        #print("INFO: FirestoreService instance created and stored in app.state.")
-        
-        # 起動時にFirestoreへの接続をヘルスチェック
-        # usersコレクションへのクエリを試みる
-        #await db_service.db_async.collection('users').limit(1).get()
-        #print("INFO: Firestore health check successful.")
-        
-    #except Exception as e:
-        # 起動に失敗した場合、エラーを記録
-     #   error_traceback = traceback.format_exc()
-      #  app.state.startup_error = error_traceback
-       # print("\n--- CRITICAL STARTUP FAILED ---")
-       # print(error_traceback)
-       # print("--- END CRITICAL STARTUP FAILED ---\n")
+    print(f"INFO: Application startup complete.")
 
-#@app.on_event("shutdown")
-#async def shutdown_event():
-    #"""アプリケーション終了時にFirestoreクライアントを閉じる"""
-    #if hasattr(app.state, 'db_service') and app.state.db_service:
-        #await app.state.db_service.close_client()
-        #print("INFO: Firestore async client closed.")
+@app.on_event("shutdown")
+async def shutdown_event():
+    """アプリケーション終了時に実行される処理。"""
+    print(f"INFO: Application shutdown process begins...")
+    if hasattr(app.state, 'db_service') and app.state.db_service:
+        await app.state.db_service.close_client()
+    print(f"INFO: Application shutdown complete.")
 
-# ★★★ ミドルウェアの設定 ★★★
+
+# --- ミドルウェアの設定 (CORS -> Session の順) ---
+
+# CORSミドルウェア
 origins = [
     "https://liff.line.me",
     "https://miniapp.line.me",
@@ -63,8 +73,11 @@ origins = [
     "http://localhost:8000",
     "http://127.0.0.1:8000",
 ]
-if settings.NGROK_URL and settings.NGROK_URL not in origins:
-    origins.append(settings.NGROK_URL)
+# .env や env.yaml で設定された SERVICE_URL を許可オリジンに追加
+if settings.SERVICE_URL:
+    origins.append(settings.SERVICE_URL)
+# ローカル開発用に localhost:3000 を追加 (もしフロントエンドを別で開発する場合)
+# origins.append("http://localhost:3000")
 
 app.add_middleware(
     CORSMiddleware,
@@ -78,7 +91,10 @@ print(f"INFO: CORS middleware configured with origins: {origins}")
 app.add_middleware(SessionMiddleware, secret_key=settings.SESSION_SECRET_KEY)
 print("INFO: Session middleware configured.")
 
-# ★★★ 静的ファイルとテンプレートの設定 ★★★
+
+# --- 静的ファイルとテンプレートの設定 ---
+
+# 静的ファイルのマウント
 static_dir = BASE_DIR / "static"
 if static_dir.is_dir():
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -111,22 +127,33 @@ async def read_root():
 # ★★★ デバッグエンドポイント ★★★
 @app.get("/config-check", tags=["Utility"], include_in_schema=False)
 async def check_config():
-    db_status = "Not initialized or error during startup."
-    if hasattr(app.state, 'startup_error') and app.state.startup_error:
-        db_status = f"Startup failed. See logs for details. Error starts with: {app.state.startup_error[:200]}..."
-    elif hasattr(app.state, 'db_service') and app.state.db_service and app.state.db_service.db_async:
-        db_status = f"Initialized (Project: {app.state.db_service.db_async.project}, DB: {app.state.db_service.db_async.database})"
-    
+    db_status = "Not available in app.state"
+    if hasattr(app.state, 'db_service') and app.state.db_service:
+        db_client = app.state.db_service.db_async
+        if db_client:
+            db_status = f"Initialized (Project: {db_client.project}, DB: {db_client.database})"
+        else:
+            db_status = "Initialization failed (client is None)"
+
     return {
         "project_name": settings.PROJECT_NAME,
-        "gcp_project_id_from_settings": settings.GCP_PROJECT_ID,
-        "session_secret_key_is_set": bool(settings.SESSION_SECRET_KEY),
-        "firestore_db_status_in_app_state": db_status
+        "api_v1_prefix": settings.API_V1_STR,
+        "service_url": settings.SERVICE_URL,
+        "gcp_project_id": settings.GCP_PROJECT_ID,
+        "firestore_database_id": settings.DATABASE_ID,
+        "firestore_client_status": db_status,
+        "openai_model": settings.OPENAI_MODEL_NAME
     }
+
+# --- Uvicorn起動スクリプト ---
 
 if __name__ == "__main__":
     import uvicorn
+    import os
+    
+    # Cloud Runが提供するPORT環境変数を尊重する。なければ8000をデフォルトに。
+    port = int(os.environ.get("PORT", 8000))
+    # host は 0.0.0.0 を基本とする (コンテナ環境では必須)
     host = getattr(settings, "HOST", "0.0.0.0")
-    port = getattr(settings, "PORT", "8000")
     print(f"INFO: Starting Uvicorn server on {host}:{port}")
     uvicorn.run("main:app", host=host, port=port, reload=True)

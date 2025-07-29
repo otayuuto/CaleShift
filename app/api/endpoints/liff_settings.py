@@ -1,4 +1,5 @@
 # app/api/endpoints/liff_settings.py
+from datetime import datetime
 from fastapi import APIRouter, Request, Depends, HTTPException, status, Body, Path as FastApiPath
 from fastapi.responses import HTMLResponse
 import traceback
@@ -43,49 +44,46 @@ async def liff_shift_list_page(request: Request):
 
 # シフト登録確認・編集用LIFFページ
 @router.get("/liff/shifts/confirm", response_class=HTMLResponse, tags=["LIFF Pages"])
-async def liff_shift_confirm_page(
-    request: Request,
-    pending_id: Optional[str] = None, # ★ pending_id をオプショナルにする
-    liff_state: Optional[str] = None # ★ liff.state を受け取る (クエリパラメータ名は 'liff.state' ではなく 'liff_state')
-                                    # FastAPIはドットを含むクエリパラメータ名を扱いにくい場合があるため、
-                                    # request.query_params を直接見る方が確実
-):
-    """シフト登録確認・編集用LIFFページ (liff_shift_confirm.html) を表示します。"""
+async def liff_shift_confirm_page(request: Request): # ★ 引数を request のみに変更
+    """
+    シフト登録確認・編集用LIFFページ (liff_shift_confirm.html) を表示します。
+    liff.state を考慮して、クエリパラメータを堅牢にパースします。
+    """
     templates = request.app.state.templates
     if templates is None:
         raise HTTPException(status_code=500, detail="Server configuration error: Template engine not found.")
 
-    final_pending_id = pending_id # まずは直接の pending_id を試す
+    # --- パラメータ取得ロジック ---
+    query_params = request.query_params
+    print(f"DEBUG: Received query parameters: {query_params}") # ★ 実際に届いたクエリパラメータをログに出力
 
-    # もし pending_id が直接取得できなければ、liff.state をパースしてみる
-    if not final_pending_id:
-        # FastAPIではクエリパラメータのドットがアンダースコアに変換されることがあるが、
-        # request.query_params を直接見るのが最も確実
-        liff_state_from_query = request.query_params.get("liff.state")
-        if liff_state_from_query:
-            print(f"DEBUG: Found liff.state: {liff_state_from_query}")
+    pending_id = query_params.get("pending_id")
+
+    if not pending_id:
+        # liff.state を確認
+        liff_state = query_params.get("liff.state")
+        if liff_state:
+            print(f"DEBUG: 'pending_id' not found directly. Parsing liff.state: '{liff_state}'")
             # liff.state の値はURLエンコードされている (例: %3Fpending_id%3Dxxxx)
-            # さらに、その中身もクエリ文字列になっている (例: ?pending_id=xxxx)
-            # URLデコードはFastAPIが自動で行うので、中身のクエリをパースする
-            
-            # liff.state の先頭が '?' で始まっている場合がある
-            query_in_liff_state = liff_state_from_query
+            # FastAPIがデコードしてくれるので、中身のクエリ文字列 (?pending_id=xxxx) をパースする
+            query_in_liff_state = liff_state
             if query_in_liff_state.startswith("?"):
                 query_in_liff_state = query_in_liff_state[1:]
-                
+            
             parsed_params = parse_qs(query_in_liff_state)
             if 'pending_id' in parsed_params:
-                final_pending_id = parsed_params['pending_id'][0] # parse_qs は値のリストを返す
-                print(f"DEBUG: Extracted pending_id from liff.state: {final_pending_id}")
+                pending_id = parsed_params['pending_id'][0]
+                print(f"DEBUG: Extracted pending_id from liff.state: '{pending_id}'")
 
-    if not final_pending_id:
-        # それでも見つからない場合はエラー
-        print("ERROR: Could not find 'pending_id' directly or within 'liff.state'.")
-        raise HTTPException(status_code=400, detail="Required parameter 'pending_id' is missing.")
+    if not pending_id:
+        print(f"CRITICAL_ERROR: Could not extract 'pending_id' from query params. Full query: {query_params}")
+        # ユーザーに分かりやすいエラーページを返すことも検討
+        # return templates.TemplateResponse("error_page.html", {"request": request, "error_message": "必要な情報が不足しています。"})
+        raise HTTPException(status_code=400, detail="Required information (pending_id) is missing from the URL. Please try again from the link in LINE.")
 
     return templates.TemplateResponse("liff_shift_confirm.html", {
         "request": request,
-        "pending_id": final_pending_id # 抽出したIDをテンプレートに渡す
+        "pending_id": pending_id
     })
 
 # ==============================================================================
@@ -174,10 +172,37 @@ async def get_user_shifts(
     line_user_id: str,
     db_service: FirestoreService = Depends(get_db_service)
 ):
+    """指定されたユーザーのシフト履歴を取得します。"""
+    # ... (db_service, workplace_id のチェックは同じ) ...
     try:
         workplace_id = await db_service.get_primary_workplace_id_for_user(line_user_id)
         if not workplace_id:
             return {"shifts": []}
+        
+        shift_history_list = await db_service.get_shift_history_for_user_in_workplace(
+            workplace_id=workplace_id,
+            line_user_id=line_user_id
+        )
+        if shift_history_list is None:
+            raise HTTPException(status_code=500, detail="Failed to retrieve shift history.")
+
+        # ★★★ ここからが修正箇所 ★★★
+        # Firestoreから返されたdatetimeオブジェクトを、フロントエンドで正しく解釈できる
+        # タイムゾーン付きのISO 8601形式の文字列に変換する。
+        
+        processed_history = []
+        for history_item in shift_history_list:
+            if 'start_time' in history_item and isinstance(history_item['start_time'], datetime):
+                # datetimeオブジェクトをISO形式文字列に変換 (例: "2025-07-25T08:30:00+00:00")
+                history_item['start_time'] = history_item['start_time'].isoformat()
+            
+            if 'end_time' in history_item and isinstance(history_item['end_time'], datetime):
+                history_item['end_time'] = history_item['end_time'].isoformat()
+            
+            processed_history.append(history_item)
+
+
+        return {"shifts": processed_history} # ★ 変換後のリストを返す
         shift_history = await db_service.get_shift_history_for_user_in_workplace(
             workplace_id=workplace_id,
             line_user_id=line_user_id

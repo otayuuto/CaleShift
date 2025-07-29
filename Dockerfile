@@ -1,5 +1,12 @@
+# Dockerfile (修正・最適化後)
+
 # 1. ベースイメージの選択
-FROM python:3.12-slim
+# 安定しており、広く使われているバージョン（例: 3.11-slim）を使用します。
+# あなたのローカル開発環境のPythonバージョンに合わせるのが理想的です。
+FROM python:3.11-slim
+
+# 環境変数を設定 (Pythonのバッファリングを無効にし、ログがすぐに出力されるようにする)
+ENV PYTHONUNBUFFERED 1
 
 # 2. 作業ディレクトリの設定
 WORKDIR /app
@@ -24,4 +31,4 @@ COPY ./templates /app/templates
 # COPY ./static /app/static
 
 # 7. アプリケーションの起動コマンド
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--proxy-headers", "--forwarded-allow-ips", "*"]
