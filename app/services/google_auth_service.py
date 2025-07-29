@@ -11,53 +11,25 @@ from fastapi import Request # Request をインポート
 from app.core.config import settings
 
 def get_effective_redirect_uri(request: Optional[Request] = None) -> str:
-    """
-    現在のリクエストや環境設定に基づいて、有効なリダイレクトURIを決定します。
-    """
-    # 1. .env の GOOGLE_OAUTH_REDIRECT_URI を最優先 (ngrok URLが固定の場合や本番用)
+    # .env の GOOGLE_OAUTH_REDIRECT_URI を最優先
+    # Cloud Runにデプロイする場合、この値を固定のHTTPS URLに設定しておくのが最も確実
     primary_redirect_uri = settings.GOOGLE_OAUTH_REDIRECT_URI
+    if primary_redirect_uri and primary_redirect_uri.startswith("https://"):
+        return primary_redirect_uri
 
-    # 2. NGROK_URL 環境変数があれば、それを使って動的に生成 (開発時のngrok用)
-    #    注意: この動的に生成したURIもGCPコンソールに登録されている必要がある。
-    if settings.ENVIRONMENT == "local" and settings.NGROK_URL and settings.NGROK_URL.startswith("https://"):
-        base_url = settings.NGROK_URL.rstrip("/")
-        # コールバックパスは固定 (例: /api/v1/google/auth/callback)
-        # このパスは FastAPI のルーター設定と一致させる
-        callback_path = f"{settings.API_V1_STR}/google/auth/callback"
-        dynamic_ngrok_uri = f"{base_url}{callback_path}"
-        print(f"DEBUG: Dynamic NGROK redirect_uri candidate: {dynamic_ngrok_uri}")
-        # ここで、GCPに登録済みのURIと照合するなどのロジックも入れられるが、
-        # 基本的にはGCPに登録されている主要なURIを使うか、
-        # NGROK_URLから生成したものをGCPにも登録しておく。
-        # ここでは、NGROK_URLがあればそれを優先的に使ってみる例。
-        # ただし、この動的生成URIがGCPにないと mismatch エラーになる。
-        # 安全なのは、常に settings.GOOGLE_OAUTH_REDIRECT_URI を使うこと。
-        # ここでは、もし NGROK_URL が .env の GOOGLE_OAUTH_REDIRECT_URI と異なる場合に
-        # NGROK_URL を優先するかどうかという問題。
-        # 簡単のため、settings.GOOGLE_OAUTH_REDIRECT_URI を正として使う。
-        # もし動的にしたいなら、settings.GOOGLE_OAUTH_REDIRECT_URI を上書きするロジックをconfig.pyに入れるか、
-        # この関数が返す値を settings.GOOGLE_OAUTH_REDIRECT_URI と比較して選択する。
-        # 今回はシンプルに settings.GOOGLE_OAUTH_REDIRECT_URI を使う。
-        # もし、NGROK_URL が設定されていて、それが settings.GOOGLE_OAUTH_REDIRECT_URI と異なり、
-        # かつGCPにNGROK_URLベースのものが登録されているなら、そちらを使う、という判断も可能。
-        # print(f"DEBUG: Using primary redirect_uri from settings: {primary_redirect_uri}")
-        return primary_redirect_uri # settingsの値を信頼する
-
-    elif request: # リバースプロキシ環境などを考慮する場合
+    # フォールバックとしてヘッダーから動的に生成 (Dockerfileの--proxy-headers設定が必要)
+    if request:
         proto = request.headers.get("x-forwarded-proto", request.url.scheme)
         host = request.headers.get("x-forwarded-host", request.url.netloc)
-        if host: # hostが取得できた場合のみ
+        if host:
             base_url = f"{proto}://{host}"
-            callback_path = f"{settings.API_V1_STR}/google/auth/callback"
-            dynamic_header_uri = f"{base_url}{callback_path}"
-            print(f"DEBUG: Dynamic redirect_uri candidate from headers: {dynamic_header_uri}")
-            # これもGCPに登録されている必要がある。
-            # settings.GOOGLE_OAUTH_REDIRECT_URI と比較して選択するなどのロジック。
-            # ここでは settings.GOOGLE_OAUTH_REDIRECT_URI を優先。
-            return primary_redirect_uri
-
+            callback_path = f"{settings.API_V_STR}/google/auth/callback" # settings.API_V1_STR のtypo修正
+            dynamic_uri = f"{base_url}{callback_path}"
+            print(f"DEBUG: Dynamically constructed redirect_uri from headers: {dynamic_uri}")
+            return dynamic_uri
+    
+    # 最終フォールバック
     return primary_redirect_uri
-
 
 def get_google_oauth_flow(request: Optional[Request] = None) -> Flow:
     redirect_uri_to_use = get_effective_redirect_uri(request)

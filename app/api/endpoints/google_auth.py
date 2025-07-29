@@ -7,37 +7,44 @@ from app.services.google_auth_service import generate_auth_url, exchange_code_fo
 from app.core.config import settings
 from app.api.dependencies import get_db_service
 from app.services.firestore_service import FirestoreService
+from app.services import google_auth_service
 
 router = APIRouter()
 
-@router.get("/login", summary="Redirect to Google OAuth consent screen")
-async def login_via_google(
+@router.get("/login", summary="Start Google OAuth flow from LIFF")
+async def start_login_from_liff(
     request: Request,
-    # db_service: FirestoreService = Depends(get_db_service), # /login ではDB操作は不要なので削除してOK
-    line_id: Optional[str] = None
+    line_id: Optional[str] = None,
+    display_name: Optional[str] = None
 ):
     """
-    ユーザーをGoogleの認証ページにリダイレクトします。
-    stateとLINE User IDをセッションに保存します。
+    LIFFから呼び出され、LINE User IDをセッションに保存し、
+    Googleの認証ページへサーバーサイドでリダイレクトします。
     """
-    line_user_id_to_store = line_id
-    if not line_user_id_to_store:
-        line_user_id_to_store = "test-line-user-for-google-oauth-12345" # フォールバック
-        print(f"WARNING: 'line_id' query parameter not provided for /login. Using test ID: {line_user_id_to_store}")
+    if not line_id:
+        raise HTTPException(status_code=400, detail="LINE User ID (line_id) is required.")
     
-    request.session['current_line_user_id_for_oauth'] = line_user_id_to_store
-    print(f"DEBUG: Set 'current_line_user_id_for_oauth' to: {line_user_id_to_store} in session.")
-            
-    authorization_url, state = generate_auth_url(request) 
-    
-    request.session['oauth_state'] = state
-    print(f"INFO: Redirecting to Google for user {line_user_id_to_store}. Session CSRF state set: {state}")
-    return RedirectResponse(url=authorization_url)
+    # 1. 必要な情報をセッションに保存
+    request.session['current_line_user_id_for_oauth'] = line_id
+    if display_name:
+        request.session['current_line_user_display_name_for_oauth'] = display_name
+    print(f"INFO: Storing session data for OAuth. User ID: {line_id}")
 
+    # 2. Google認証URLを生成
+    #    この時点ではまだリダイレクトしない
+    authorization_url, state = google_auth_service.generate_auth_url(request)
+    
+    # 3. CSRF対策のstateもセッションに保存
+    request.session['oauth_state'] = state
+    print(f"INFO: Generated Google Auth URL and stored CSRF state in session: {state}")
+
+    # 4. サーバーからのリダイレクトレスポンスを返す
+    #    これにより、ブラウザが直接Googleの認証ページに遷移する
+    return RedirectResponse(url=authorization_url)
 @router.get("/auth/callback", summary="Handle Google OAuth callback")
 async def google_auth_callback(
     request: Request,
-    db_service: FirestoreService = Depends(get_db_service), # ★★★ ここに依存性注入を追加 ★★★
+    db_service: FirestoreService = Depends(get_db_service),
     code: Optional[str] = None,
     error: Optional[str] = None,
     state: Optional[str] = None
